@@ -2,5 +2,6 @@
 
 members = [
     "party",
-    "p2p"
+    "client/network",
+    "client/peerset"
 ]
