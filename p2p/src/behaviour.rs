@@ -2,7 +2,8 @@ use std::iter;
 use std::time::Duration;
 use anyhow::Context;
 use futures::Sink;
-use libp2p::PeerId;
+use libp2p::identity::Keypair;
+use libp2p::{Multiaddr, PeerId};
 use libp2p::NetworkBehaviour;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::request_response::{
@@ -15,37 +16,40 @@ use libp2p::swarm::NetworkBehaviourEventProcess;
 use round_based::{async_runtime::AsyncProtocol, Msg};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use crate::mpc_protocol::{MPCCodec, MPCProtocol, MPCMessage, MPCResponse, MPCResult, MPCRecord};
+use crate::{MPCCodec, MPCProtocol, WireRequest, WireResponse, MPCResult, MPCRecord, P2PConfig};
 
 #[derive(NetworkBehaviour)]
 #[behaviour(event_process = true)]
-pub struct RoundBasedBehaviour {
+pub struct MultiPartyBehaviour {
     msg_proto: RequestResponse<MPCCodec>,
 
     #[behaviour(ignore)]
-    peer_ids: Vec<PeerId>,
+    peer_ids: Vec<(PeerId, Multiaddr)>,
 }
 
-impl RoundBasedBehaviour {
-    pub fn new(peer_ids: Vec<PeerId>) -> RoundBasedBehaviour {
+impl MultiPartyBehaviour {
+    pub fn new(
+        keypair: &Keypair,
+        peer_ids: Vec<(PeerId, Multiaddr)>,
+        network_name: &str,
+    ) -> MultiPartyBehaviour {
         let msg_proto = {
-            // set request_timeout and connection_keep_alive if necessary
             let cfg = RequestResponseConfig::default();
             let protocols = iter::once((MPCProtocol(), ProtocolSupport::Full));
             RequestResponse::new(MPCCodec(), protocols, cfg)
         };
 
-        RoundBasedBehaviour{
+        MultiPartyBehaviour {
             peer_ids,
             msg_proto
         }
     }
 }
 
-impl NetworkBehaviourEventProcess<RequestResponseEvent<MPCMessage, MPCResponse>> for RoundBasedBehaviour
+impl NetworkBehaviourEventProcess<RequestResponseEvent<WireRequest, WireResponse>> for MultiPartyBehaviour
 {
     // Called when the mpc_protocol produces an event.
-    fn inject_event(&mut self, event: RequestResponseEvent<MPCMessage, MPCResponse>) {
+    fn inject_event(&mut self, event: RequestResponseEvent<WireRequest, WireResponse>) {
         match event {
             Message { peer: _, message } => match message {
                 Request {
@@ -79,14 +83,14 @@ impl NetworkBehaviourEventProcess<RequestResponseEvent<MPCMessage, MPCResponse>>
     }
 }
 
-impl RoundBasedBehaviour {
+impl MultiPartyBehaviour {
     fn handle_request_msg(
         &mut self,
-        request: MPCMessage,
-        channel: ResponseChannel<MPCResponse>,
+        request: WireRequest,
+        channel: ResponseChannel<WireResponse>,
     ) {
         match request {
-            MPCMessage::Message(r) => {
+            WireRequest::Message(r) => {
                 let duration = if r.timeout_sec > 0 {
                     r.timeout_sec
                 } else {
@@ -95,41 +99,27 @@ impl RoundBasedBehaviour {
 
                 println!("Successfully stored record.");
                 self.msg_proto
-                    .send_response(channel, MPCResponse::Response(MPCResult::Success));
+                    .send_response(channel, WireResponse::Response(MPCResult::Success));
 
             },
             Ping => {
                 println!("Received Ping, we will send a Pong back.");
-                self.msg_proto.send_response(channel, MPCResponse::Pong);
+                self.msg_proto.send_response(channel, WireResponse::Pong);
             }
         }
     }
 
-    fn handle_response_msg(&mut self, request_id: RequestId, response: MPCResponse) {
+    fn handle_response_msg(&mut self, request_id: RequestId, response: WireResponse) {
         match response {
-            MPCResponse::Pong => {
+            WireResponse::Pong => {
                 println!("Received Pong for request {:?}.", request_id);
             }
-            MPCResponse::Response(result) => {
+            WireResponse::Response(result) => {
                 println!(
                     "Received Result for publish request {:?}: {:?}.",
                     request_id, result
                 );
             }
         }
-    }
-
-    pub fn broadcast_fn<'a, M>(&'a mut self) -> impl Sink<Msg<M>, Error = anyhow::Error> + 'a where M: 'a + Serialize + DeserializeOwned, {
-        futures::sink::unfold(self, |behaviour, message: Msg<M>| async move {
-            let serialized = serde_json::to_string(&message).context("serialize message")?;
-            for peer in &behaviour.peer_ids { //
-                behaviour.msg_proto.send_request(peer,MPCMessage::Message(MPCRecord{
-                    key: "MSG".to_string(),
-                    timeout_sec: 100,
-                    value: serialized.clone(),
-                }));
-            }
-            Ok::<_, anyhow::Error>(behaviour)
-        })
     }
 }
