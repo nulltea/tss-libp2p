@@ -10,6 +10,7 @@ log = "0.4"
 anyhow = "1.0.56"
 futures = "0.3.21"
 async-std = { version = "1.10.0", features = ["attributes"] }
+libp2p = "0.40.0"
 serde = {version = "1.0", features = ["derive"] }
 serde_ipld_dagcbor = "0.1.2"
 round-based = { version = "0.1.4" }
@@ -17,6 +18,7 @@ multi-party-ecdsa = {git = "https://github.com/ZenGo-X/multi-party-ecdsa"}
 pretty_env_logger = "0.4"
 
 mpc-p2p = {path = "../client/network" }
+mpc-peerset = {path = "../client/peerset"}
 
 [dev-dependencies]
 round-based = { version = "0.1.4", features = ["dev"] }

@@ -34,7 +34,6 @@
 //! - If provided, a ["requests processing"](ProtocolConfig::inbound_queue) channel
 //! is used to handle incoming requests.
 
-use crate::ReputationChange;
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
@@ -65,9 +64,8 @@ use std::{
 
 pub use libp2p::request_response::{InboundFailure, OutboundFailure, RequestId};
 use mpc_peerset::{PeersetHandle, ReputationChange};
-use sc_peerset::{PeersetHandle, ReputationChange};
 
-const BANNED_THRESHOLD: i32 = 82 * (i32::min_value() / 100);
+const BANNED_THRESHOLD: i32 = 82 * (i32::MIN / 100);
 
 /// Configuration for a single request-response protocol.
 #[derive(Debug, Clone)]
@@ -115,15 +113,39 @@ pub struct ProtocolConfig {
     pub inbound_queue: Option<mpsc::Sender<IncomingMessage>>,
 }
 
+impl ProtocolConfig {
+    pub fn new(name: Cow<'static, str>, inbound_sender: mpsc::Sender<IncomingMessage>) -> Self {
+        Self {
+            name,
+            max_request_size: 8 * 1024 * 1024,
+            max_response_size: 10 * 1024,
+            request_timeout: Duration::from_secs(20),
+            inbound_queue: Some(inbound_sender),
+        }
+    }
+
+    pub fn new_with_receiver(
+        name: Cow<'static, str>,
+        buffer_size: usize,
+    ) -> (Self, mpsc::Receiver<IncomingMessage>) {
+        let (inbound_sender, inbound_receiver) = mpsc::channel(buffer_size);
+
+        (Self::new(name, inbound_sender), inbound_receiver)
+    }
+}
+
 /// A single request received by a peer on a request-response protocol.
 #[derive(Debug)]
 pub struct IncomingMessage {
     /// Who sent the request.
     pub peer: PeerId,
 
-    /// Request sent by the remote. Will always be smaller than
+    /// Message sent by the remote. Will always be smaller than
     /// [`ProtocolConfig::max_request_size`].
     pub payload: Vec<u8>,
+
+    /// Message send to all peers in peerset.
+    pub is_broadcast: bool,
 
     /// Channel to send back the response.
     ///
@@ -193,7 +215,10 @@ pub enum Event {
     },
 
     /// A request protocol handler issued reputation changes for the given peer.
-    ReputationChanges { peer: PeerId, changes: Vec<ReputationChange> },
+    ReputationChanges {
+        peer: PeerId,
+        changes: Vec<ReputationChange>,
+    },
 }
 
 /// Combination of a protocol name and a request id.
@@ -210,7 +235,10 @@ struct ProtocolRequestId {
 
 impl From<(Cow<'static, str>, RequestId)> for ProtocolRequestId {
     fn from((protocol, request_id): (Cow<'static, str>, RequestId)) -> Self {
-        Self { protocol, request_id }
+        Self {
+            protocol,
+            request_id,
+        }
     }
 }
 
@@ -241,12 +269,15 @@ pub struct GenericBroadcast {
     /// "response builder" used to build responses for incoming requests.
     protocols: HashMap<
         Cow<'static, str>,
-        (RequestResponse<GenericCodec>, Option<mpsc::Sender<IncomingMessage>>),
+        (
+            RequestResponse<GenericCodec>,
+            Option<mpsc::Sender<IncomingMessage>>,
+        ),
     >,
 
     /// Pending requests, passed down to a [`RequestResponse`] behaviour, awaiting a reply.
     pending_requests:
-    HashMap<ProtocolRequestId, (Instant, oneshot::Sender<Result<Vec<u8>, RequestFailure>>)>,
+        HashMap<ProtocolRequestId, (Instant, oneshot::Sender<Result<Vec<u8>, RequestFailure>>)>,
 
     /// Whenever an incoming request arrives, a `Future` is added to this list and will yield the
     /// start time and the response to send back to the remote.
@@ -274,7 +305,7 @@ pub struct GenericBroadcast {
 struct BroadcastMessage {
     peer: PeerId,
     request_id: RequestId,
-    request: Vec<u8>,
+    request: GenericPayloadWrapper,
     channel: ResponseChannel<Result<Vec<u8>, ()>>,
     protocol: String,
     resp_builder: Option<futures::channel::mpsc::Sender<IncomingMessage>>,
@@ -322,7 +353,9 @@ impl GenericBroadcast {
 
             match protocols.entry(protocol.name) {
                 Entry::Vacant(e) => e.insert((rq_rp, protocol.inbound_queue)),
-                Entry::Occupied(e) => return Err(RegisterError::DuplicateProtocol(e.key().clone())),
+                Entry::Occupied(e) => {
+                    return Err(RegisterError::DuplicateProtocol(e.key().clone()))
+                }
             };
         }
 
@@ -335,6 +368,50 @@ impl GenericBroadcast {
             peerset,
             message_request: None,
         })
+    }
+
+    fn _send_message(
+        &mut self,
+        target: &PeerId,
+        protocol_name: &str,
+        request: GenericPayloadWrapper,
+        pending_response: oneshot::Sender<Result<Vec<u8>, RequestFailure>>,
+        connect: IfDisconnected,
+    ) {
+        if let Some((protocol, _)) = self.protocols.get_mut(protocol_name) {
+            if protocol.is_connected(target) || connect.should_connect() {
+                let request_id = protocol.send_request(target, request);
+                let prev_req_id = self.pending_requests.insert(
+                    (protocol_name.to_string().into(), request_id).into(),
+                    (Instant::now(), pending_response),
+                );
+                debug_assert!(prev_req_id.is_none(), "Expect request id to be unique.");
+            } else {
+                if pending_response
+                    .send(Err(RequestFailure::NotConnected))
+                    .is_err()
+                {
+                    log::debug!(
+                        target: "sub-libp2p",
+                        "Not connected to peer {:?}. At the same time local \
+                         node is no longer interested in the result.",
+                        target,
+                    );
+                };
+            }
+        } else {
+            if pending_response
+                .send(Err(RequestFailure::UnknownProtocol))
+                .is_err()
+            {
+                log::debug!(
+                    target: "sub-libp2p",
+                    "Unknown protocol {:?}. At the same time local \
+                     node is no longer interested in the result.",
+                    protocol_name,
+                );
+            };
+        }
     }
 
     /// Initiates sending a request.
@@ -351,34 +428,34 @@ impl GenericBroadcast {
         pending_response: oneshot::Sender<Result<Vec<u8>, RequestFailure>>,
         connect: IfDisconnected,
     ) {
-        if let Some((protocol, _)) = self.protocols.get_mut(protocol_name) {
-            if protocol.is_connected(target) || connect.should_connect() {
-                let request_id = protocol.send_request(target, request);
-                let prev_req_id = self.pending_requests.insert(
-                    (protocol_name.to_string().into(), request_id).into(),
-                    (Instant::now(), pending_response),
-                );
-                debug_assert!(prev_req_id.is_none(), "Expect request id to be unique.");
-            } else {
-                if pending_response.send(Err(RequestFailure::NotConnected)).is_err() {
-                    log::debug!(
-						target: "sub-libp2p",
-						"Not connected to peer {:?}. At the same time local \
-						 node is no longer interested in the result.",
-						target,
-					);
-                };
-            }
-        } else {
-            if pending_response.send(Err(RequestFailure::UnknownProtocol)).is_err() {
-                log::debug!(
-					target: "sub-libp2p",
-					"Unknown protocol {:?}. At the same time local \
-					 node is no longer interested in the result.",
-					protocol_name,
-				);
-            };
+        self._send_message(
+            target,
+            protocol_name,
+            GenericPayloadWrapper::Direct(request),
+            pending_response,
+            connect,
+        );
+    }
+
+    pub fn broadcast_message<'a>(
+        &mut self,
+        targets: impl Iterator<Item = &'a PeerId>,
+        protocol_name: &str,
+        request: Vec<u8>,
+        pending_response: oneshot::Sender<Result<Vec<u8>, RequestFailure>>,
+        connect: IfDisconnected,
+    ) {
+        for target in targets {
+            let (response_sender, response_receiver) = oneshot::channel();
+            self._send_message(
+                target,
+                protocol_name,
+                GenericPayloadWrapper::Broadcast(request.clone()),
+                response_sender,
+                connect,
+            );
         }
+        // TODO: aggregate responses for echo broadcast verification
     }
 
     fn new_handler_with_replacement(
@@ -404,9 +481,8 @@ impl GenericBroadcast {
 }
 
 impl NetworkBehaviour for GenericBroadcast {
-    type ProtocolsHandler = MultiHandler<
-        String, <RequestResponse<GenericCodec> as NetworkBehaviour>::ProtocolsHandler
-    >;
+    type ProtocolsHandler =
+        MultiHandler<String, <RequestResponse<GenericCodec> as NetworkBehaviour>::ProtocolsHandler>;
     type OutEvent = Event;
 
     fn new_handler(&mut self) -> Self::ProtocolsHandler {
@@ -475,7 +551,7 @@ impl NetworkBehaviour for GenericBroadcast {
         (p_name, event): <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
     ) {
         if let Some((proto, _)) = self.protocols.get_mut(&*p_name) {
-            return proto.inject_event(peer_id, connection, event)
+            return proto.inject_event(peer_id, connection, event);
         }
 
         log::warn!(target: "sub-libp2p",
@@ -544,8 +620,7 @@ impl NetworkBehaviour for GenericBroadcast {
     ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
         'poll_all: loop {
             if let Some(message_request) = self.message_request.take() {
-                // Now we can can poll `MessageRequest` until we get the reputation
-
+                // Now we cannot poll `MessageRequest` until we get the reputation
                 let BroadcastMessage {
                     peer,
                     request_id,
@@ -560,7 +635,6 @@ impl NetworkBehaviour for GenericBroadcast {
                 match reputation {
                     Poll::Pending => {
                         // Save the state to poll it again next time.
-
                         self.message_request = Some(BroadcastMessage {
                             peer,
                             request_id,
@@ -570,8 +644,8 @@ impl NetworkBehaviour for GenericBroadcast {
                             resp_builder,
                             get_peer_reputation,
                         });
-                        return Poll::Pending
-                    },
+                        return Poll::Pending;
+                    }
                     Poll::Ready(reputation) => {
                         // Once we get the reputation we can continue processing the request.
 
@@ -581,12 +655,12 @@ impl NetworkBehaviour for GenericBroadcast {
 
                         if reputation < BANNED_THRESHOLD {
                             log::debug!(
-								target: "sub-libp2p",
-								"Cannot handle requests from a node with a low reputation {}: {}",
-								peer,
-								reputation,
-							);
-                            continue 'poll_all
+                                target: "sub-libp2p",
+                                "Cannot handle requests from a node with a low reputation {}: {}",
+                                peer,
+                                reputation,
+                            );
+                            continue 'poll_all;
                         }
 
                         let (tx, rx) = oneshot::channel();
@@ -599,7 +673,8 @@ impl NetworkBehaviour for GenericBroadcast {
                             // an `InboundFailure::Omission` event.
                             let _ = resp_builder.try_send(IncomingMessage {
                                 peer: peer.clone(),
-                                payload: request,
+                                payload: request.into_bytes(),
+                                is_broadcast: request.is_broadcast(),
                                 pending_response: tx,
                             });
                         } else {
@@ -626,8 +701,8 @@ impl NetworkBehaviour for GenericBroadcast {
 
                         // This `continue` makes sure that `pending_responses` gets polled
                         // after we have added the new element.
-                        continue 'poll_all
-                    },
+                        continue 'poll_all;
+                    }
                 }
             }
             // Poll to see if any response is ready to be sent back.
@@ -637,7 +712,12 @@ impl NetworkBehaviour for GenericBroadcast {
                     request_id,
                     protocol: protocol_name,
                     inner_channel,
-                    response: OutgoingResponse { result, reputation_changes, sent_feedback },
+                    response:
+                        OutgoingResponse {
+                            result,
+                            reputation_changes,
+                            sent_feedback,
+                        },
                 } = match outcome {
                     Some(outcome) => outcome,
                     // The response builder was too busy or handling the request failed. This is
@@ -651,12 +731,12 @@ impl NetworkBehaviour for GenericBroadcast {
                             // Note: Failure is handled further below when receiving
                             // `InboundFailure` event from `RequestResponse` behaviour.
                             log::debug!(
-								target: "sub-libp2p",
-								"Failed to send response for {:?} on protocol {:?} due to a \
-								 timeout or due to the connection to the peer being closed. \
-								 Dropping response",
-								request_id, protocol_name,
-							);
+                                target: "sub-libp2p",
+                                "Failed to send response for {:?} on protocol {:?} due to a \
+                                 timeout or due to the connection to the peer being closed. \
+                                 Dropping response",
+                                request_id, protocol_name,
+                            );
                         } else {
                             if let Some(sent_feedback) = sent_feedback {
                                 self.send_feedback
@@ -668,8 +748,11 @@ impl NetworkBehaviour for GenericBroadcast {
 
                 if !reputation_changes.is_empty() {
                     return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                        Event::ReputationChanges { peer, changes: reputation_changes },
-                    ))
+                        Event::ReputationChanges {
+                            peer,
+                            changes: reputation_changes,
+                        },
+                    ));
                 }
             }
 
@@ -684,40 +767,54 @@ impl NetworkBehaviour for GenericBroadcast {
                         // passed through.
                         NetworkBehaviourAction::DialAddress { address, handler } => {
                             log::error!(
-								"The request-response isn't supposed to start dialing peers"
-							);
+                                "The request-response isn't supposed to start dialing peers"
+                            );
                             let protocol = protocol.to_string();
                             let handler = self.new_handler_with_replacement(protocol, handler);
                             return Poll::Ready(NetworkBehaviourAction::DialAddress {
                                 address,
                                 handler,
-                            })
-                        },
-                        NetworkBehaviourAction::DialPeer { peer_id, condition, handler } => {
+                            });
+                        }
+                        NetworkBehaviourAction::DialPeer {
+                            peer_id,
+                            condition,
+                            handler,
+                        } => {
                             let protocol = protocol.to_string();
                             let handler = self.new_handler_with_replacement(protocol, handler);
                             return Poll::Ready(NetworkBehaviourAction::DialPeer {
                                 peer_id,
                                 condition,
                                 handler,
-                            })
-                        },
-                        NetworkBehaviourAction::NotifyHandler { peer_id, handler, event } =>
+                            });
+                        }
+                        NetworkBehaviourAction::NotifyHandler {
+                            peer_id,
+                            handler,
+                            event,
+                        } => {
                             return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
                                 peer_id,
                                 handler,
                                 event: ((*protocol).to_string(), event),
-                            }),
-                        NetworkBehaviourAction::ReportObservedAddr { address, score } =>
+                            })
+                        }
+                        NetworkBehaviourAction::ReportObservedAddr { address, score } => {
                             return Poll::Ready(NetworkBehaviourAction::ReportObservedAddr {
                                 address,
                                 score,
-                            }),
-                        NetworkBehaviourAction::CloseConnection { peer_id, connection } =>
+                            })
+                        }
+                        NetworkBehaviourAction::CloseConnection {
+                            peer_id,
+                            connection,
+                        } => {
                             return Poll::Ready(NetworkBehaviourAction::CloseConnection {
                                 peer_id,
                                 connection,
-                            }),
+                            })
+                        }
                     };
 
                     match ev {
@@ -725,7 +822,12 @@ impl NetworkBehaviour for GenericBroadcast {
                         RequestResponseEvent::Message {
                             peer,
                             message:
-                            RequestResponseMessage::Request { request_id, request, channel, .. },
+                                RequestResponseMessage::Request {
+                                    request_id,
+                                    request,
+                                    channel,
+                                    ..
+                                },
                         } => {
                             self.pending_responses_arrival_time.insert(
                                 (protocol.clone(), request_id.clone()).into(),
@@ -751,13 +853,17 @@ impl NetworkBehaviour for GenericBroadcast {
 
                             // This `continue` makes sure that `message_request` gets polled
                             // after we have added the new element.
-                            continue 'poll_all
-                        },
+                            continue 'poll_all;
+                        }
 
                         // Received a response from a remote to one of our requests.
                         RequestResponseEvent::Message {
                             peer,
-                            message: RequestResponseMessage::Response { request_id, response },
+                            message:
+                                RequestResponseMessage::Response {
+                                    request_id,
+                                    response,
+                                },
                             ..
                         } => {
                             let (started, delivered) = match self
@@ -769,16 +875,16 @@ impl NetworkBehaviour for GenericBroadcast {
                                         .send(response.map_err(|()| RequestFailure::Refused))
                                         .map_err(|_| RequestFailure::Obsolete);
                                     (started, delivered)
-                                },
+                                }
                                 None => {
                                     log::warn!(
-										target: "sub-libp2p",
-										"Received `RequestResponseEvent::Message` with unexpected request id {:?}",
-										request_id,
-									);
+                                        target: "sub-libp2p",
+                                        "Received `RequestResponseEvent::Message` with unexpected request id {:?}",
+                                        request_id,
+                                    );
                                     debug_assert!(false);
-                                    continue
-                                },
+                                    continue;
+                                }
                             };
 
                             let out = Event::BroadcastFinished {
@@ -788,12 +894,15 @@ impl NetworkBehaviour for GenericBroadcast {
                                 result: delivered,
                             };
 
-                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(out))
-                        },
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(out));
+                        }
 
                         // One of our requests has failed.
                         RequestResponseEvent::OutboundFailure {
-                            peer, request_id, error, ..
+                            peer,
+                            request_id,
+                            error,
+                            ..
                         } => {
                             let started = match self
                                 .pending_requests
@@ -805,23 +914,23 @@ impl NetworkBehaviour for GenericBroadcast {
                                         .is_err()
                                     {
                                         log::debug!(
-											target: "sub-libp2p",
-											"Request with id {:?} failed. At the same time local \
-											 node is no longer interested in the result.",
-											request_id,
-										);
+                                            target: "sub-libp2p",
+                                            "Request with id {:?} failed. At the same time local \
+                                             node is no longer interested in the result.",
+                                            request_id,
+                                        );
                                     }
                                     started
-                                },
+                                }
                                 None => {
                                     log::warn!(
-										target: "sub-libp2p",
-										"Received `RequestResponseEvent::Message` with unexpected request id {:?}",
-										request_id,
-									);
+                                        target: "sub-libp2p",
+                                        "Received `RequestResponseEvent::Message` with unexpected request id {:?}",
+                                        request_id,
+                                    );
                                     debug_assert!(false);
-                                    continue
-                                },
+                                    continue;
+                                }
                             };
 
                             let out = Event::BroadcastFinished {
@@ -831,24 +940,28 @@ impl NetworkBehaviour for GenericBroadcast {
                                 result: Err(RequestFailure::Network(error)),
                             };
 
-                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(out))
-                        },
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(out));
+                        }
 
                         // An inbound request failed, either while reading the request or due to
                         // failing to send a response.
                         RequestResponseEvent::InboundFailure {
-                            request_id, peer, error, ..
+                            request_id,
+                            peer,
+                            error,
+                            ..
                         } => {
                             self.pending_responses_arrival_time
                                 .remove(&(protocol.clone(), request_id).into());
-                            self.send_feedback.remove(&(protocol.clone(), request_id).into());
+                            self.send_feedback
+                                .remove(&(protocol.clone(), request_id).into());
                             let out = Event::InboundMessage {
                                 peer,
                                 protocol: protocol.clone(),
                                 result: Err(ResponseFailure::Network(error)),
                             };
-                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(out))
-                        },
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(out));
+                        }
 
                         // A response to an inbound request has been sent.
                         RequestResponseEvent::ResponseSent { request_id, peer } => {
@@ -864,8 +977,9 @@ impl NetworkBehaviour for GenericBroadcast {
 									 failed; qed.",
                                 );
 
-                            if let Some(send_feedback) =
-                            self.send_feedback.remove(&(protocol.clone(), request_id).into())
+                            if let Some(send_feedback) = self
+                                .send_feedback
+                                .remove(&(protocol.clone(), request_id).into())
                             {
                                 let _ = send_feedback.send(());
                             }
@@ -876,13 +990,13 @@ impl NetworkBehaviour for GenericBroadcast {
                                 result: Ok(arrival_time),
                             };
 
-                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(out))
-                        },
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(out));
+                        }
                     };
                 }
             }
 
-            break Poll::Pending
+            break Poll::Pending;
         }
     }
 }
@@ -920,6 +1034,39 @@ pub enum ResponseFailure {
     Network(InboundFailure),
 }
 
+pub(crate) enum GenericPayloadWrapper {
+    Direct(Vec<u8>),
+    Broadcast(Vec<u8>),
+}
+
+impl GenericPayloadWrapper {
+    fn from_bytes(mut bytes: Vec<u8>) -> Self {
+        match bytes.pop() {
+            Some(0) => GenericPayloadWrapper::Direct(bytes),
+            Some(1) => GenericPayloadWrapper::Broadcast(bytes),
+            _ => GenericPayloadWrapper::Broadcast(bytes),
+        }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        let append_byte = |mut bytes: Vec<u8>, byte: u8| -> Vec<u8> {
+            bytes.push(byte);
+            bytes
+        };
+
+        match self {
+            GenericPayloadWrapper::Direct(bytes) => append_byte(bytes, 0),
+            GenericPayloadWrapper::Broadcast(bytes) => append_byte(bytes, 1),
+        }
+    }
+
+    fn is_broadcast(&self) -> bool {
+        matches!(self, GenericPayloadWrapper::Broadcast(bytes))
+    }
+}
+
+pub struct BroadcastAck;
+
 /// Implements the libp2p [`RequestResponseCodec`] trait. Defines how streams of bytes are turned
 /// into requests and responses and vice-versa.
 #[derive(Debug, Clone)]
@@ -932,7 +1079,7 @@ pub struct GenericCodec {
 #[async_trait::async_trait]
 impl RequestResponseCodec for GenericCodec {
     type Protocol = Vec<u8>;
-    type Request = Vec<u8>;
+    type Request = GenericPayloadWrapper;
     type Response = Result<Vec<u8>, ()>;
 
     async fn read_request<T>(
@@ -940,8 +1087,8 @@ impl RequestResponseCodec for GenericCodec {
         _: &Self::Protocol,
         mut io: &mut T,
     ) -> io::Result<Self::Request>
-        where
-            T: AsyncRead + Unpin + Send,
+    where
+        T: AsyncRead + Unpin + Send,
     {
         // Read the length.
         let length = unsigned_varint::aio::read_usize(&mut io)
@@ -950,14 +1097,17 @@ impl RequestResponseCodec for GenericCodec {
         if length > usize::try_from(self.max_request_size).unwrap_or(usize::MAX) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Request size exceeds limit: {} > {}", length, self.max_request_size),
-            ))
+                format!(
+                    "Request size exceeds limit: {} > {}",
+                    length, self.max_request_size
+                ),
+            ));
         }
 
         // Read the payload.
         let mut buffer = vec![0; length];
         io.read_exact(&mut buffer).await?;
-        Ok(buffer)
+        Ok(GenericPayloadWrapper::from_bytes(buffer))
     }
 
     async fn read_response<T>(
@@ -965,8 +1115,8 @@ impl RequestResponseCodec for GenericCodec {
         _: &Self::Protocol,
         mut io: &mut T,
     ) -> io::Result<Self::Response>
-        where
-            T: AsyncRead + Unpin + Send,
+    where
+        T: AsyncRead + Unpin + Send,
     {
         // Note that this function returns a `Result<Result<...>>`. Returning an `Err` is
         // considered as a protocol error and will result in the entire connection being closed.
@@ -977,16 +1127,21 @@ impl RequestResponseCodec for GenericCodec {
         let length = match unsigned_varint::aio::read_usize(&mut io).await {
             Ok(l) => l,
             Err(unsigned_varint::io::ReadError::Io(err))
-            if matches!(err.kind(), io::ErrorKind::UnexpectedEof) =>
-                return Ok(Err(())),
+                if matches!(err.kind(), io::ErrorKind::UnexpectedEof) =>
+            {
+                return Ok(Err(()))
+            }
             Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidInput, err)),
         };
 
         if length > usize::try_from(self.max_response_size).unwrap_or(usize::MAX) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Response size exceeds limit: {} > {}", length, self.max_response_size),
-            ))
+                format!(
+                    "Response size exceeds limit: {} > {}",
+                    length, self.max_response_size
+                ),
+            ));
         }
 
         // Read the payload.
@@ -1001,14 +1156,17 @@ impl RequestResponseCodec for GenericCodec {
         io: &mut T,
         req: Self::Request,
     ) -> io::Result<()>
-        where
-            T: AsyncWrite + Unpin + Send,
+    where
+        T: AsyncWrite + Unpin + Send,
     {
+        let req = req.into_bytes();
+
         // TODO: check the length?
         // Write the length.
         {
             let mut buffer = unsigned_varint::encode::usize_buffer();
-            io.write_all(unsigned_varint::encode::usize(req.len(), &mut buffer)).await?;
+            io.write_all(unsigned_varint::encode::usize(req.len(), &mut buffer))
+                .await?;
         }
 
         // Write the payload.
@@ -1024,8 +1182,8 @@ impl RequestResponseCodec for GenericCodec {
         io: &mut T,
         res: Self::Response,
     ) -> io::Result<()>
-        where
-            T: AsyncWrite + Unpin + Send,
+    where
+        T: AsyncWrite + Unpin + Send,
     {
         // If `res` is an `Err`, we jump to closing the substream without writing anything on it.
         if let Ok(res) = res {
@@ -1033,7 +1191,8 @@ impl RequestResponseCodec for GenericCodec {
             // Write the length.
             {
                 let mut buffer = unsigned_varint::encode::usize_buffer();
-                io.write_all(unsigned_varint::encode::usize(res.len(), &mut buffer)).await?;
+                io.write_all(unsigned_varint::encode::usize(res.len(), &mut buffer))
+                    .await?;
             }
 
             // Write the payload.

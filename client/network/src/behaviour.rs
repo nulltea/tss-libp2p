@@ -1,28 +1,14 @@
+use crate::{broadcast, MASTER_PEERSET};
+use futures::channel::oneshot;
+use libp2p::swarm::NetworkBehaviourEventProcess;
+use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
+use libp2p::NetworkBehaviour;
+use libp2p::PeerId;
+use log::debug;
+use mpc_peerset::Peerset;
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::iter;
 use std::task::{Context, Poll};
-use std::time::Duration;
-use futures::channel::oneshot;
-use futures::Sink;
-use libp2p::identity::Keypair;
-use libp2p::{Multiaddr, PeerId};
-use libp2p::core::transport::memory::Channel;
-use libp2p::NetworkBehaviour;
-use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
-use libp2p::request_response::{
-    RequestId, RequestResponse,
-    RequestResponseEvent::{self, InboundFailure, Message, OutboundFailure},
-    RequestResponseMessage::{Request, Response},
-    ResponseChannel, RequestResponseConfig, ProtocolSupport
-};
-use libp2p::swarm::NetworkBehaviourEventProcess;
-use log::{debug, error, trace};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use mpc_peerset::{Peerset, PeersetHandle, SetId};
-use crate::{broadcast};
-use crate::mpc_protocol::{MPCProtocol, MPCProtocolCodec, WireResponse};
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "BehaviourOut", poll_method = "poll", event_process = true)]
@@ -44,21 +30,19 @@ pub(crate) enum BehaviourOut {
     },
 }
 
-impl Behaviour
-    where M: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
-{
+impl Behaviour {
     pub fn new(
         mut broadcast_protocols: Vec<broadcast::ProtocolConfig>,
         peerset: &'static mut Peerset,
-    ) -> Behaviour {
-        Behaviour {
+    ) -> Result<Behaviour, broadcast::RegisterError> {
+        Ok(Behaviour {
             message_broadcast: broadcast::GenericBroadcast::new(
                 broadcast_protocols.into_iter(),
                 peerset.get_handle(),
             )?,
             events: VecDeque::new(),
-            peerset
-        }
+            peerset,
+        })
     }
 
     /// Initiates direct sending of a message.
@@ -82,12 +66,13 @@ impl Behaviour
         pending_response: oneshot::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
-        for peer in self.peerset.connected_peers(MAIN_PEERSET) {
-            self.message_broadcast
-                .send_message(peer, protocol, message.clone(),
-                              pending_response.clone(), connect)
-        }
-
+        self.message_broadcast.broadcast_message(
+            self.peerset.connected_peers(MASTER_PEERSET),
+            protocol,
+            message,
+            pending_response,
+            connect,
+        );
     }
 
     /// Consumes the events list when polled.
@@ -98,27 +83,42 @@ impl Behaviour
     ) -> Poll<NetworkBehaviourAction<BehaviourOut, <Self as NetworkBehaviour>::ProtocolsHandler>>
     {
         if let Some(event) = self.events.pop_front() {
-            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event))
+            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
         }
 
         Poll::Pending
     }
 }
 
-impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour
-{
+impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour {
     fn inject_event(&mut self, event: broadcast::Event) {
         match event {
-            broadcast::Event::InboundMessage { peer, protocol, result } => {
-                self.events.push_back(BehaviourOut::InboundMessage { peer, protocol });
-            },
-            broadcast::Event::BroadcastFinished { peer, protocol, duration, result } => {
-                debug!("broadcast for protocol {:?} finished to {:?} peer: {:?}", protocol.to_string(), peer, changes);
-            },
-            broadcast::Event::ReputationChanges { peer, changes } =>
+            broadcast::Event::InboundMessage {
+                peer,
+                protocol,
+                result,
+            } => {
+                self.events
+                    .push_back(BehaviourOut::InboundMessage { peer, protocol });
+            }
+            broadcast::Event::BroadcastFinished {
+                peer,
+                protocol,
+                duration,
+                result,
+            } => {
+                debug!(
+                    "broadcast for protocol {:?} finished to {:?} peer: {:?}",
+                    protocol.to_string(),
+                    peer,
+                    result
+                );
+            }
+            broadcast::Event::ReputationChanges { peer, changes } => {
                 for change in changes {
                     debug!("reputation changed for {:?} peer: {:?}", peer, changes);
-                },
+                }
+            }
         }
     }
 }
