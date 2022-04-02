@@ -1,14 +1,34 @@
-use crate::{broadcast, MASTER_PEERSET};
+// This file was a part of Substrate.
+// broadcast.rc <> request_response.rc
+
+// Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+use crate::broadcast;
 use futures::channel::oneshot;
 use libp2p::swarm::NetworkBehaviourEventProcess;
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
-use libp2p::NetworkBehaviour;
+use libp2p::{Multiaddr, NetworkBehaviour};
 use libp2p::PeerId;
-use log::debug;
+use log::{debug, error, info};
 use mpc_peerset::Peerset;
 use std::borrow::Cow;
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 #[derive(NetworkBehaviour)]
@@ -19,7 +39,9 @@ pub(crate) struct Behaviour {
     #[behaviour(ignore)]
     events: VecDeque<BehaviourOut>,
     #[behaviour(ignore)]
-    peerset: Arc<Peerset>,
+    peerset: Peerset,
+    #[behaviour(ignore)]
+    addresses: HashMap<PeerId, Multiaddr>,
 }
 
 pub(crate) enum BehaviourOut {
@@ -34,7 +56,8 @@ pub(crate) enum BehaviourOut {
 impl Behaviour {
     pub fn new(
         broadcast_protocols: Vec<broadcast::ProtocolConfig>,
-        peerset: Arc<Peerset>,
+        peerset: Peerset,
+        addresses: HashMap<PeerId, Multiaddr>
     ) -> Result<Behaviour, broadcast::RegisterError> {
         Ok(Behaviour {
             message_broadcast: broadcast::GenericBroadcast::new(
@@ -42,7 +65,8 @@ impl Behaviour {
                 peerset.get_handle(),
             )?,
             events: VecDeque::new(),
-           peerset,
+            peerset,
+            addresses
         })
     }
 
@@ -68,7 +92,7 @@ impl Behaviour {
         connect: broadcast::IfDisconnected,
     ) {
         self.message_broadcast.broadcast_message(
-            self.peerset.connected_peers(MASTER_PEERSET),
+            self.peerset.state().connected_peers(),
             protocol,
             message,
             pending_response,
@@ -79,15 +103,45 @@ impl Behaviour {
     /// Consumes the events list when polled.
     fn poll(
         &mut self,
-        _cx: &mut Context,
+        cx: &mut Context,
         _: &mut impl PollParameters,
     ) -> Poll<NetworkBehaviourAction<BehaviourOut, <Self as NetworkBehaviour>::ProtocolsHandler>>
     {
+        loop {
+            match futures::Stream::poll_next(Pin::new(&mut self.peerset), cx) {
+                Poll::Ready(Some(mpc_peerset::Message::Connect(peer_id))) => {
+                    // todo: self.peerset_report_connect(peer_id);
+                },
+                Poll::Ready(Some(mpc_peerset::Message::Drop(peer_id))) => {
+                    // todo: self.peerset_report_disconnect(peer_id, set_id);
+                },
+                Poll::Ready(None) => {
+                    error!(target: "sub-libp2p", "Peerset receiver stream has returned None");
+                    break
+                },
+                Poll::Pending => break,
+            }
+        }
+
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
         }
 
         Poll::Pending
+    }
+
+    pub fn mark_peer_connected(&mut self, peer_id: PeerId) {
+        let peer = self.peerset.state_mut().peer(&peer_id);
+        if let Some(not_connected) = peer.into_not_connected() {
+            if not_connected.try_accept_peer().is_ok() {
+                println!("Peer {} marked as connected", peer_id.to_base58())
+            } else {
+                error!("Failed dealing peer {}", peer_id.to_base58());
+            }
+        }
+
+        let conns: Vec<&PeerId> = self.peerset.state().connected_peers().collect();
+        println!("connected peers: {}", conns.len())
     }
 }
 

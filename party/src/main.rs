@@ -1,45 +1,50 @@
+mod config;
+
+use crate::config::{Config, PartyConfig};
+use crate::identity::Keypair;
 use anyhow::anyhow;
 use async_std::prelude::Stream;
 use async_std::task;
 use futures::channel::mpsc;
 use futures::{pin_mut, Sink, StreamExt};
-use libp2p::identity;
+use libp2p::{identity, Multiaddr, PeerId};
 use mpc_p2p::{
-    broadcast, NetworkConfig, NetworkService, NetworkWorker, Params, MASTER_PEERSET,
+    broadcast, MultiaddrWithPeerId, NetworkConfig, NetworkService, NetworkWorker, NodeKeyConfig,
+    Params, Secret,
 };
-use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::{
-    Keygen, ProtocolMessage,
-};
+use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::Keygen;
 use round_based::{AsyncProtocol, Msg};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
-
-struct MPCMessage(PM);
-
-enum PM {
-    KeygenMessage(ProtocolMessage),
-}
+use std::str::FromStr;
+use std::{env, fs};
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    pretty_env_logger::init();
+    let party_index = env::args()
+        .nth(1)
+        .expect("party index argument is required");
+    let mut file = File::create(format!("data/key{party_index}.share"))
+        .map_err(|e| anyhow!("failed to open file: {}", e))?;
+    let node_key = NodeKeyConfig::Ed25519(Secret::File(format!("data/{party_index}.key").into()));
 
-    let mut file = File::open("key.share").map_err(|e| anyhow!("failed to open file: {}", e))?;
-    let keypair = identity::Keypair::generate_ed25519();
-    let peers = vec![];
+    let mut config = Config::load_config("config.json").or_else(|_| generate_config(3))?;
+    config.sort_parties();
 
     let (keygen_config, keygen_receiver) =
-        broadcast::ProtocolConfig::new_with_receiver("keygen".into(), peers.len());
+        broadcast::ProtocolConfig::new_with_receiver("keygen".into(), config.parties.len() - 1);
 
     let (net_worker, net_service) = {
-        let network_config = NetworkConfig::new(peers.into_iter());
+        let network_peers = config.parties.into_iter()
+            .map(|p| p.network_peer);
+        let network_config = NetworkConfig::new(network_peers);
         let broadcast_protocols = vec![keygen_config];
 
-        <NetworkWorker>::new(
-            keypair,
+        NetworkWorker::new(
+            node_key,
             Params {
                 network_config,
                 broadcast_protocols,
@@ -51,12 +56,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         net_worker.run().await;
     });
 
-
-    let (
-        index,
-        incoming,
-        outgoing
-    ) = join_computation(net_service, keygen_receiver);
+    let (index, incoming, outgoing) = join_computation(net_service, keygen_receiver)
+        .await;
 
     let incoming = incoming.fuse();
 
@@ -66,28 +67,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let output = AsyncProtocol::new(keygen, incoming, outgoing)
         .run()
         .await
-        .map_err(|e| anyhow!("protocol execution terminated with error: {}", e))?;
+        .map_err(|e| anyhow!("protocol execution terminated with error: {e}"))?;
 
-    let share_bytes = serde_ipld_dagcbor::to_vec(&output)
-        .map_err(|e| anyhow!("share serialization terminated with error: {}", e))?;
+    let share_bytes = serde_json::to_vec(&output)
+        .map_err(|e| anyhow!("share serialization terminated with error: {e}"))?;
 
     file.write(&share_bytes)?;
 
-    p2p_task.cancel();
+    let _ = p2p_task.cancel().await;
 
     Ok(())
 }
 
-pub fn join_computation<M>(
+pub async fn join_computation<M>(
     network_service: NetworkService,
     incoming_receiver: mpsc::Receiver<broadcast::IncomingMessage>,
 ) -> (
     u16,
     impl Stream<Item = Result<Msg<M>, anyhow::Error>>,
     impl Sink<Msg<M>, Error = anyhow::Error>,
-) where M: Serialize + DeserializeOwned
+)
+where
+    M: Serialize + DeserializeOwned,
 {
-    let index = network_service.local_peer_index();
+    let index = network_service.local_peer_index().await;
 
     let outgoing = futures::sink::unfold(
         network_service.clone(),
@@ -95,12 +98,7 @@ pub fn join_computation<M>(
             let payload = serde_ipld_dagcbor::to_vec(&message.body)?; // todo: abstract serialization
 
             if let Some(receiver_index) = message.receiver {
-                if let Some(receiver_peer) = network_service
-                    .get_peerset()
-                    .at_index(MASTER_PEERSET, receiver_index as usize)
-                {
-                    network_service.send_message("keygen", receiver_peer.clone(), payload);
-                }
+                network_service.send_message("keygen", receiver_index, payload);
             } else {
                 network_service.broadcast_message("keygen", payload)
             }
@@ -111,25 +109,48 @@ pub fn join_computation<M>(
 
     let incoming = incoming_receiver.map(move |message: broadcast::IncomingMessage| {
         let body: M = serde_ipld_dagcbor::from_slice(&*message.payload)?;
-
-        if let Some(known_sender_index) = network_service
-            .get_peerset()
-            .index_of(MASTER_PEERSET, message.peer)
-        {
-            Ok(Msg {
-                sender: known_sender_index as u16,
-                receiver: if message.is_broadcast {
-                    None
-                } else {
-                    Some(index as u16)
-                },
-                body
-            })
-        } else {
-            //  message.pending_response.send(OutgoingResponse::)
-            Err(anyhow!("unknown sender "))
-        }
+        Ok(Msg {
+            sender: message.peer_index,
+            receiver: if message.is_broadcast {
+                None
+            } else {
+                Some(message.peer_index)
+            },
+            body,
+        })
     });
 
     (index as u16, incoming, outgoing)
+}
+
+fn generate_config(n: u32) -> Result<Config, anyhow::Error> {
+    let mut parties = vec![];
+
+    for i in 0..n {
+        let node_key = NodeKeyConfig::Ed25519(Secret::File(format!("data/{i}.key").into()));
+        let keypair = node_key
+            .into_keypair()
+            .map_err(|e| anyhow!("keypair generating err: {}", e))?;
+        let peer_id = PeerId::from(keypair.public());
+        let multiaddr = Multiaddr::from_str(format!("/ip4/127.0.0.1/tcp/400{i}").as_str())
+            .map_err(|e| anyhow!("multiaddr parce err: {}", e))?;
+        let network_peer = MultiaddrWithPeerId { multiaddr, peer_id };
+
+        parties.push(PartyConfig {
+            name: format!("player_{i}"),
+            network_peer,
+        })
+    }
+
+    let mut config = Config { parties };
+
+    config.sort_parties();
+
+    let json_bytes = serde_json::to_vec(&config)
+        .map_err(|e| anyhow!("config encoding terminated with err: {}", e))?;
+
+    fs::write("config.json", json_bytes.as_slice())
+        .map_err(|e| anyhow!("writing config err: {}", e))?;
+
+    Ok(config)
 }
