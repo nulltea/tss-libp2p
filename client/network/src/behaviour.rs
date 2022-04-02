@@ -8,6 +8,7 @@ use log::debug;
 use mpc_peerset::Peerset;
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 #[derive(NetworkBehaviour)]
@@ -18,7 +19,7 @@ pub(crate) struct Behaviour {
     #[behaviour(ignore)]
     events: VecDeque<BehaviourOut>,
     #[behaviour(ignore)]
-    peerset: &'static mut Peerset,
+    peerset: Arc<Peerset>,
 }
 
 pub(crate) enum BehaviourOut {
@@ -32,8 +33,8 @@ pub(crate) enum BehaviourOut {
 
 impl Behaviour {
     pub fn new(
-        mut broadcast_protocols: Vec<broadcast::ProtocolConfig>,
-        peerset: &'static mut Peerset,
+        broadcast_protocols: Vec<broadcast::ProtocolConfig>,
+        peerset: Arc<Peerset>,
     ) -> Result<Behaviour, broadcast::RegisterError> {
         Ok(Behaviour {
             message_broadcast: broadcast::GenericBroadcast::new(
@@ -41,7 +42,7 @@ impl Behaviour {
                 peerset.get_handle(),
             )?,
             events: VecDeque::new(),
-            peerset,
+           peerset,
         })
     }
 
@@ -108,15 +109,16 @@ impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour {
                 result,
             } => {
                 debug!(
-                    "broadcast for protocol {:?} finished to {:?} peer: {:?}",
+                    "broadcast for protocol {:?} finished to {:?} peer: {:?} took: {:?}",
                     protocol.to_string(),
                     peer,
-                    result
+                    result,
+                    duration
                 );
             }
             broadcast::Event::ReputationChanges { peer, changes } => {
                 for change in changes {
-                    debug!("reputation changed for {:?} peer: {:?}", peer, changes);
+                    debug!("reputation changed for {:?} peer: {:?}", peer, change);
                 }
             }
         }

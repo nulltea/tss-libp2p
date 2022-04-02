@@ -2341,7 +2341,6 @@ dependencies = [
  "rand 0.7.3",
  "serde",
  "serde_json",
- "wasm-timer",
 ]
 
 [[package]]

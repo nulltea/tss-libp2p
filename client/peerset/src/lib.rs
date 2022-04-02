@@ -38,14 +38,12 @@ use futures::{channel::mpsc, channel::oneshot, prelude::*};
 use libp2p::PeerId;
 use log::{debug, error, trace};
 use serde_json::json;
-use std::ops::Index;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     pin::Pin,
     task::{Context, Poll},
     time::{Duration, Instant},
 };
-use wasm_timer::Delay;
 
 pub use crate::peers_state::SetConfig;
 

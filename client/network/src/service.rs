@@ -37,13 +37,14 @@ pub struct NetworkWorker {
     /// The *actual* network.
     swarm: Swarm<Behaviour>,
 
-    peerset: mpc_peerset::Peerset,
     peerset_handle: mpc_peerset::PeersetHandle,
 
     from_service: Receiver<NetworkMessage>,
-    to_service: Sender<NetworkEvent>,
+    events_in: Sender<NetworkEvent>,
+    events_out: Receiver<NetworkEvent>,
 }
 
+#[derive(Clone)]
 pub struct NetworkService {
     /// Local copy of the `PeerId` of the local node.
     local_peer_id: PeerId,
@@ -56,9 +57,8 @@ pub struct NetworkService {
     peerset_handle: mpc_peerset::PeersetHandle,
 
     to_worker: Sender<NetworkMessage>,
-    from_worker: Receiver<NetworkEvent>,
 
-    peerset: &'static mpc_peerset::Peerset,
+    peerset: Arc<mpc_peerset::Peerset>,
 }
 
 pub const MASTER_PEERSET: SetId = SetId(0usize);
@@ -75,7 +75,7 @@ impl NetworkWorker {
             peer_id.to_base58(),
         );
 
-        let (mut peerset, peerset_handle) =
+        let (peerset, peerset_handle) =
             mpc_peerset::Peerset::from_config(mpc_peerset::PeersetConfig {
                 sets: vec![params.network_config.default_peers_set],
             });
@@ -92,8 +92,10 @@ impl NetworkWorker {
                 .boxed()
         };
 
+        let peerset = Arc::new(peerset);
+
         let behaviour = {
-            let result = Behaviour::new(params.broadcast_protocols, &mut peerset);
+            let result = Behaviour::new(params.broadcast_protocols, peerset.clone());
 
             match result {
                 Ok(b) => b,
@@ -105,9 +107,11 @@ impl NetworkWorker {
 
         let mut swarm = Swarm::new(transport, behaviour, peer_id);
 
+        let mut num_connected = 0;
         for peer in peerset.connected_peers(MASTER_PEERSET) {
             if swarm.dial(peer).is_ok() {
                 println!("Dialed peer {}", peer.to_base58());
+                num_connected += 1;
             } else {
                 println!("Failed dealing peer {}", peer.to_base58());
             }
@@ -130,19 +134,18 @@ impl NetworkWorker {
 
         let worker = NetworkWorker {
             swarm,
-            peerset,
             peerset_handle: peerset_handle.clone(),
             from_service: network_receiver_in,
-            to_service: network_sender_out,
+            events_in: network_sender_out,
+            events_out: network_receiver_out,
         };
 
         let service = NetworkService {
             local_peer_id: peer_id,
-            num_connected: Arc::new(Default::default()),
-            external_addresses: Arc::new(Default::default()),
+            num_connected: Arc::new(AtomicUsize::new(num_connected)),
+            external_addresses: Arc::new(Mutex::new(params.network_config.public_addresses)),
             to_worker: network_sender_in,
-            from_worker: network_receiver_out,
-            peerset: &peerset,
+            peerset: peerset.clone(),
             peerset_handle,
         };
 
@@ -160,9 +163,10 @@ impl NetworkWorker {
                     // outbound events
                     Some(event) => match event {
                         SwarmEvent::Behaviour(BehaviourOut::InboundMessage{peer, protocol}) => {
-                            emit_event(&self.to_service,
+                            emit_event(&self.events_in,
                                        NetworkEvent::BroadcastMessage(peer, protocol)).await;
-                        }
+                        },
+                        _ => continue
                     }
                     None => { break; }
                 },
@@ -192,7 +196,7 @@ impl NetworkWorker {
                         }
 
                         match rx.await {
-                            Ok(v) => continue,
+                            Ok(_v) => continue,
                             Err(_) => error!("failed to wait for response"),
                         }
                     }
@@ -220,7 +224,7 @@ impl NetworkService {
     }
 
     pub fn get_peerset(&self) -> &Peerset {
-        self.peerset
+        &self.peerset
     }
 
     pub fn local_peer_id(&self) -> PeerId {

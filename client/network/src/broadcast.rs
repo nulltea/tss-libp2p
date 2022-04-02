@@ -673,8 +673,8 @@ impl NetworkBehaviour for GenericBroadcast {
                             // an `InboundFailure::Omission` event.
                             let _ = resp_builder.try_send(IncomingMessage {
                                 peer: peer.clone(),
-                                payload: request.into_bytes(),
                                 is_broadcast: request.is_broadcast(),
+                                payload: request.into_bytes(),
                                 pending_response: tx,
                             });
                         } else {
@@ -1034,7 +1034,7 @@ pub enum ResponseFailure {
     Network(InboundFailure),
 }
 
-pub(crate) enum GenericPayloadWrapper {
+pub enum GenericPayloadWrapper {
     Direct(Vec<u8>),
     Broadcast(Vec<u8>),
 }
@@ -1061,11 +1061,9 @@ impl GenericPayloadWrapper {
     }
 
     fn is_broadcast(&self) -> bool {
-        matches!(self, GenericPayloadWrapper::Broadcast(bytes))
+        matches!(self, GenericPayloadWrapper::Broadcast(..))
     }
 }
-
-pub struct BroadcastAck;
 
 /// Implements the libp2p [`RequestResponseCodec`] trait. Defines how streams of bytes are turned
 /// into requests and responses and vice-versa.
