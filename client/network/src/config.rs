@@ -29,11 +29,11 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
-    pub fn new(peers: impl Iterator<Item = MultiaddrWithPeerId>) -> Self {
+    pub fn new(multiaddr: Multiaddr, peers: impl Iterator<Item = MultiaddrWithPeerId>) -> Self {
         Self {
             node_name: "node".to_string(),
-            listen_addresses: vec!["/ip4/0.0.0.0/tcp/0".parse().unwrap()],
-            public_addresses: vec!["/ip4/0.0.0.0/tcp/0".parse().unwrap()],
+            listen_addresses: vec![multiaddr.clone()],
+            public_addresses: vec![multiaddr],
             initial_peers: peers.collect(),
         }
     }

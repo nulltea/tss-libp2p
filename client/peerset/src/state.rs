@@ -26,7 +26,8 @@ use std::{
     },
     time::Instant,
 };
-use crate::{ConnectedPeer, NotConnectedPeer, Peer, Reputation, PeersetConfig, SetInfo, UnknownPeer};
+use itertools::Itertools;
+use crate::{ConnectedPeer, NotConnectedPeer, Peer, Reputation, PeersetConfig, SetInfo, UnknownPeer, MembershipState};
 
 /// State storage behind the peerset.
 ///
@@ -36,6 +37,7 @@ use crate::{ConnectedPeer, NotConnectedPeer, Peer, Reputation, PeersetConfig, Se
 /// has a reputation and is either connected to us or not.
 #[derive(Debug, Clone)]
 pub struct PeersState {
+    local_peer_id: PeerId,
     /// List of nodes that we know about.
     ///
     /// > **Note**: This list should really be ordered by decreasing reputation, so that we can
@@ -71,8 +73,9 @@ impl Node {
 
 impl PeersState {
     /// Builds a new empty [`PeersState`].
-    pub fn new(config: PeersetConfig) -> Self {
+    pub fn new(local_peer_id: PeerId, config: PeersetConfig) -> Self {
         Self {
+            local_peer_id,
             nodes: HashMap::new(),
             set: SetInfo {
                 num_peers: 0,
@@ -124,17 +127,18 @@ impl PeersState {
 
     /// Returns the index of a specified peer in a given set.
     pub fn index_of(&self, peer: PeerId) -> Option<usize> {
-        self.connected_peers()
-            .position(|elem| {
-                let p = (*elem);
-                let b = p == peer;
-                b
-            })
+        self.nodes.iter()
+            .map(|(p, _)| p)
+            .sorted_by_key(|p| p.to_bytes())
+            .position(|elem| *elem == peer)
     }
 
     /// Returns the index of a specified peer in a given set.
     pub fn at_index(&self, index: usize) -> Option<&PeerId> {
-        let peers: Vec<&PeerId> = self.connected_peers().collect();
+        let peers: Vec<&PeerId> = self.nodes
+            .iter()
+            .map(|(p, _)| p)
+            .collect();
 
         if peers.len() > index {
             Some(peers[index])
@@ -147,8 +151,18 @@ impl PeersState {
     pub fn connected_peers(&self) -> impl Iterator<Item = &PeerId> {
         self.nodes
             .iter()
-            .filter(move |(_, p)| p.set.is_connected())
-            .map(|(p, _)| p)
+            .filter(move |(p, n)| {
+                n.set.is_connected() && p.to_bytes() != self.local_peer_id.to_bytes()
+            }).map(|(p, _)| p)
+    }
+
+    /// Returns peer's membership state in the set.
+    pub fn peer_membership(&self, peer_id: &PeerId) -> MembershipState {
+        self.nodes
+            .iter()
+            .find(move |(p, _)| p.to_bytes() != peer_id.to_bytes())
+            .map(|(_, n)| n.set)
+            .unwrap_or(MembershipState::NotMember)
     }
 
     /// Returns the peer with the highest reputation and that we are not connected to.
@@ -173,35 +187,5 @@ impl PeersState {
             state: self,
             peer_id: Cow::Owned(peer_id),
         })
-    }
-}
-
-/// Whether we are connected to a node in the context of a specific set.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(crate) enum MembershipState {
-    /// Node isn't part of that set.
-    NotMember,
-    /// We are connected through an ingoing connection.
-    Connected,
-    /// Node is part of that set, but we are not connected to it.
-    NotConnected {
-        /// When we were last connected to the node, or if we were never connected when we
-        /// discovered it.
-        last_connected: Instant,
-    },
-}
-
-impl MembershipState {
-    /// Returns `true` for [`MembershipState::Connected`].
-    fn is_connected(self) -> bool {
-        match self {
-            Self::Connected => true,
-            Self::NotMember | Self::NotConnected { .. } => false,
-        }
-    }
-
-    /// Returns `true` for [`MembershipState::NotConnected`].
-    fn is_not_connected(self) -> bool {
-        matches!(self, Self::NotConnected { .. })
     }
 }

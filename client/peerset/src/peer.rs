@@ -3,7 +3,7 @@ use std::time::Instant;
 use libp2p::PeerId;
 use log::error;
 use std::collections::hash_map::OccupiedEntry;
-use crate::state::{Node, PeersState, MembershipState};
+use crate::state::{Node, PeersState};
 
 /// Grants access to the state of a peer in the [`PeersState`] in the context of a specific set.
 pub enum Peer<'a> {
@@ -272,6 +272,36 @@ impl<'a> UnknownPeer<'a> {
             state: self.parent,
             peer_id: self.peer_id,
         }
+    }
+}
+
+/// Whether we are connected to a node in the context of a specific set.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum MembershipState {
+    /// Node isn't part of that set.
+    NotMember,
+    /// We are connected through an ingoing connection.
+    Connected,
+    /// Node is part of that set, but we are not connected to it.
+    NotConnected {
+        /// When we were last connected to the node, or if we were never connected when we
+        /// discovered it.
+        last_connected: Instant,
+    },
+}
+
+impl MembershipState {
+    /// Returns `true` for [`MembershipState::Connected`].
+    pub fn is_connected(self) -> bool {
+        match self {
+            Self::Connected => true,
+            Self::NotMember | Self::NotConnected { .. } => false,
+        }
+    }
+
+    /// Returns `true` for [`MembershipState::NotConnected`].
+    pub fn is_not_connected(self) -> bool {
+        matches!(self, Self::NotConnected { .. })
     }
 }
 

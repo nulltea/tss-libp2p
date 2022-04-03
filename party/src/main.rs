@@ -22,8 +22,9 @@ use std::io::Write;
 use std::str::FromStr;
 use std::{env, fs};
 
-#[async_std::main]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    pretty_env_logger::init();
     let party_index = env::args()
         .nth(1)
         .expect("party index argument is required");
@@ -31,16 +32,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map_err(|e| anyhow!("failed to open file: {}", e))?;
     let node_key = NodeKeyConfig::Ed25519(Secret::File(format!("data/{party_index}.key").into()));
 
+    let local_peer_id = PeerId::from(node_key.clone().into_keypair()?.public());
+
     let mut config = Config::load_config("config.json").or_else(|_| generate_config(3))?;
-    config.sort_parties();
+    let local_party_addr = config.addr_of_peer_id(local_peer_id).unwrap();
 
     let (keygen_config, keygen_receiver) =
-        broadcast::ProtocolConfig::new_with_receiver("keygen".into(), config.parties.len() - 1);
+        broadcast::ProtocolConfig::new_with_receiver("/keygen/0.1.0".into(), config.parties.len() - 1);
 
     let (net_worker, net_service) = {
         let network_peers = config.parties.into_iter()
             .map(|p| p.network_peer);
-        let network_config = NetworkConfig::new(network_peers);
+        let network_config = NetworkConfig::new(
+            local_party_addr,
+            network_peers
+        );
+
+        for peer in network_config.initial_peers.iter() {
+            println!("peer: {}", peer)
+        }
+
         let broadcast_protocols = vec![keygen_config];
 
         NetworkWorker::new(
@@ -63,7 +74,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     pin_mut!(incoming, outgoing);
 
-    let keygen = Keygen::new(index, 2, 3)?;
+    println!("local party index: {}", index + 1);
+
+    let keygen = Keygen::new(index + 1, 2, 3)?;
     let output = AsyncProtocol::new(keygen, incoming, outgoing)
         .run()
         .await
@@ -98,9 +111,9 @@ where
             let payload = serde_ipld_dagcbor::to_vec(&message.body)?; // todo: abstract serialization
 
             if let Some(receiver_index) = message.receiver {
-                network_service.send_message("keygen", receiver_index, payload);
+                network_service.send_message("keygen", receiver_index - 1, payload).await;
             } else {
-                network_service.broadcast_message("keygen", payload)
+                network_service.broadcast_message("/keygen/0.1.0", payload).await;
             }
 
             Ok::<_, anyhow::Error>(network_service)
@@ -110,7 +123,7 @@ where
     let incoming = incoming_receiver.map(move |message: broadcast::IncomingMessage| {
         let body: M = serde_ipld_dagcbor::from_slice(&*message.payload)?;
         Ok(Msg {
-            sender: message.peer_index,
+            sender: message.peer_index + 1,
             receiver: if message.is_broadcast {
                 None
             } else {
@@ -143,8 +156,6 @@ fn generate_config(n: u32) -> Result<Config, anyhow::Error> {
     }
 
     let mut config = Config { parties };
-
-    config.sort_parties();
 
     let json_bytes = serde_json::to_vec(&config)
         .map_err(|e| anyhow!("config encoding terminated with err: {}", e))?;

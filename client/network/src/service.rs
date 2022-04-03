@@ -12,11 +12,14 @@ use libp2p::swarm::{AddressScore, SwarmEvent};
 use libp2p::tcp::TcpConfig;
 use libp2p::{mplex, noise, Multiaddr, PeerId, Swarm, Transport};
 use log::{error, info, warn};
-use mpc_peerset::{Peerset};
+use mpc_peerset::{MembershipState, Peerset};
 use parking_lot::Mutex;
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 use anyhow::anyhow;
 use futures_util::TryFutureExt;
 
@@ -40,10 +43,13 @@ pub struct NetworkWorker {
     swarm: Swarm<Behaviour>,
 
     peerset: mpc_peerset::PeersetHandle,
+    addresses: HashMap<PeerId, Multiaddr>,
 
     from_service: Receiver<NetworkMessage>,
     events_in: Sender<NetworkEvent>,
     events_out: Receiver<NetworkEvent>,
+
+    local_peer_id: PeerId,
 }
 
 #[derive(Clone)]
@@ -66,11 +72,11 @@ impl NetworkWorker {
         params: config::Params,
     ) -> Result<(NetworkWorker, NetworkService), Error> {
         let keypair = node_key.into_keypair().map_err(|e| Error::Io(e))?;
-        let peer_id = PeerId::from(keypair.public());
+        let local_peer_id = PeerId::from(keypair.public());
         info!(
             target: "sub-libp2p",
             "🏷 Local node identity is: {}",
-            peer_id.to_base58(),
+            local_peer_id.to_base58(),
         );
 
         let mut addresses = {
@@ -85,7 +91,7 @@ impl NetworkWorker {
                 .into_iter()
                 .map(|p| p.peer_id);
 
-            mpc_peerset::Peerset::from_config(mpc_peerset::PeersetConfig::new_static(peers))
+            mpc_peerset::Peerset::from_config(local_peer_id.clone(), mpc_peerset::PeersetConfig::new_static(peers))
         };
 
         let transport = {
@@ -102,6 +108,7 @@ impl NetworkWorker {
 
         let behaviour = {
             let result = Behaviour::new(
+                &keypair,
                 params.broadcast_protocols,
                 peerset,
                 addresses.clone()
@@ -115,13 +122,14 @@ impl NetworkWorker {
             }
         };
 
-        let mut swarm = Swarm::new(transport, behaviour, peer_id);
+        let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
         // Listen on the addresses.
         for addr in &params.network_config.listen_addresses {
             if let Err(err) = swarm.listen_on(addr.clone()) {
                 warn!(target: "sub-libp2p", "Can't listen on {} because: {:?}", addr, err)
             }
+            println!("listening on {}", addr.to_string())
         }
 
         // Add external addresses.
@@ -130,13 +138,15 @@ impl NetworkWorker {
         }
 
         let mut num_connected = 0;
-        for (peer_id, addr) in addresses {
-            if swarm.dial_addr(addr).is_ok() {
-                info!("Connected to peer {}", peer_id.to_base58());
-                swarm.behaviour_mut().mark_peer_connected(peer_id);
-                num_connected += 1;
-            } else {
-                error!("Failed dealing peer {}", peer_id.to_base58());
+        for (peer_id, addr) in addresses.clone() {
+            if peer_id != local_peer_id {
+                if swarm.dial_addr(addr).is_ok() {
+                    info!("Connected to peer {}", peer_id.to_base58());
+                    swarm.behaviour_mut().mark_peer_as_connected(peer_id);
+                    num_connected += 1;
+                } else {
+                    error!("Failed dealing peer {}", peer_id.to_base58());
+                }
             }
         }
 
@@ -144,15 +154,17 @@ impl NetworkWorker {
         let (network_sender_out, network_receiver_out) = unbounded();
 
         let worker = NetworkWorker {
+            local_peer_id,
             swarm,
             peerset: peerset_handle.clone(),
+            addresses,
             from_service: network_receiver_in,
             events_in: network_sender_out,
             events_out: network_receiver_out,
         };
 
         let service = NetworkService {
-            local_peer_id: peer_id,
+            local_peer_id,
             num_connected: Arc::new(AtomicUsize::new(num_connected)),
             external_addresses: Arc::new(Mutex::new(params.network_config.public_addresses)),
             to_worker: network_sender_in,
@@ -166,22 +178,66 @@ impl NetworkWorker {
     pub async fn run(self) {
         let mut swarm_stream = self.swarm.fuse();
         let mut network_stream = self.from_service.fuse();
+        let mut connected_peers = HashSet::new();
 
         loop {
+            if connected_peers.len() == self.addresses.len() - 1 { // minus ourselves
+                let mut just_connected = vec![];
+                for (peer_id, addr) in self.addresses
+                    .iter()
+                    .filter(|(p, _)| p.to_bytes() != self.local_peer_id.to_bytes()
+                        && connected_peers.contains(p.clone())
+                    )
+                {
+                    match swarm_stream.get_ref().behaviour().peer_membership(peer_id) {
+                        MembershipState::NotMember => warn!("all peers are expected to discovered at this point"),
+                        MembershipState::Connected => {
+                            just_connected.push(peer_id.clone());
+                        },
+                        MembershipState::NotConnected { .. } => {
+                            if swarm_stream.get_mut().dial_addr(addr.clone()).is_err() {
+                                error!("Failed dealing peer {}", peer_id.to_base58());
+                            }
+                        },
+                    }
+                }
+
+                for connected_peer in just_connected.into_iter() {
+                    connected_peers.insert(connected_peer);
+                }
+
+                sleep(Duration::from_secs(1));
+            }
+
             select! {
                 swarm_event = swarm_stream.next() => match swarm_event {
-                    // outbound events
+                    // Outbound events
                     Some(event) => match event {
                         SwarmEvent::Behaviour(BehaviourOut::InboundMessage{peer, protocol}) => {
+                            info!("Inbound message from {:?} related to {:?} protocol", peer, protocol);
                             emit_event(&self.events_in,
-                                       NetworkEvent::BroadcastMessage(peer, protocol)).await;
+                                       NetworkEvent::BroadcastMessage(peer, protocol),
+                            ).await;
                         },
+                        SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {:?}", address),
+                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                            swarm_stream
+                                .get_mut()
+                                .behaviour_mut()
+                                .mark_peer_as_connected(peer_id);
+                        },
+                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            swarm_stream
+                                .get_mut()
+                                .behaviour_mut()
+                                .mark_peer_as_disconnected(peer_id);
+                        }
                         _ => continue
                     }
                     None => { break; }
                 },
                 rpc_message = network_stream.next() => match rpc_message {
-                    // Inbound messages
+                    // Inbound requests
                     Some(request) => {
                         let (tx, rx) = oneshot::channel();
                         let behaviour = swarm_stream.get_mut().behaviour_mut();
@@ -224,19 +280,19 @@ impl NetworkWorker {
 }
 
 impl NetworkService {
-    pub fn broadcast_message(&self, protocol: &str, payload: Vec<u8>) {
+    pub async fn broadcast_message(&self, protocol: &str, payload: Vec<u8>) {
         self.to_worker.send(NetworkMessage::Broadcast(
             Cow::Owned(protocol.to_string()),
             payload,
-        ));
+        )).await;
     }
 
-    pub fn send_message(&self, protocol: &str, peer_index: u16, payload: Vec<u8>) {
+    pub async fn send_message(&self, protocol: &str, peer_index: u16, payload: Vec<u8>) {
         self.to_worker.send(NetworkMessage::SendDirect(
             Cow::Owned(protocol.to_string()),
             peer_index,
             payload,
-        ));
+        )).await;
     }
 
     pub fn local_peer_id(&self) -> PeerId {

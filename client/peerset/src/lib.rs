@@ -209,7 +209,7 @@ pub struct Peerset {
 
 impl Peerset {
     /// Builds a new peerset from the given configuration.
-    pub fn from_config(config: PeersetConfig) -> (Self, PeersetHandle) {
+    pub fn from_config(local_peer_id: PeerId, config: PeersetConfig) -> (Self, PeersetHandle) {
         let (tx, rx) = mpsc::unbounded();
 
         let handle = PeersetHandle { tx: tx.clone() };
@@ -218,7 +218,7 @@ impl Peerset {
             let now = Instant::now();
 
             Self {
-                data: state::PeersState::new(config.clone()),
+                data: state::PeersState::new(local_peer_id, config.clone()),
                 tx,
                 rx,
                 message_queue: VecDeque::new(),
@@ -226,8 +226,8 @@ impl Peerset {
             }
         };
 
-        for node in config.initial_nodes {
-            peerset.add_to_peers_set(node);
+        for peer_id in config.initial_nodes {
+            peerset.add_to_peers_set(peer_id);
         }
 
         if let Some(boot_nodes) = config.boot_nodes {

@@ -19,15 +19,11 @@ impl Config {
             .map_err(|e| anyhow!("decoding config terminated with err: {}", e))
     }
 
-    pub fn sort_parties(&mut self) {
-        self.parties.sort_by_key(|p| p.network_peer.peer_id);
-    }
-
-    pub fn index_of_party(&self, peer: PeerId) -> usize {
+    pub fn addr_of_peer_id(&self, peer: PeerId) -> Option<Multiaddr> {
         self.parties
             .iter()
-            .position(|p| p.network_peer.peer_id == peer)
-            .unwrap()
+            .find(|p| p.network_peer.peer_id == peer)
+            .map(|p| p.network_peer.multiaddr.clone())
     }
 }
 

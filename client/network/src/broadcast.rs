@@ -298,7 +298,7 @@ impl GenericBroadcast {
         let mut protocols = HashMap::new();
         for protocol in list {
             let mut cfg = RequestResponseConfig::default();
-            cfg.set_connection_keep_alive(Duration::from_secs(10));
+            cfg.set_connection_keep_alive(Duration::from_secs(20));
             cfg.set_request_timeout(protocol.request_timeout);
 
             let protocol_support = if protocol.inbound_queue.is_some() {
@@ -1005,28 +1005,22 @@ pub enum GenericPayloadWrapper {
 }
 
 impl GenericPayloadWrapper {
-    fn from_bytes(mut bytes: Vec<u8>) -> Self {
-        match bytes.pop() {
-            Some(0) => GenericPayloadWrapper::Direct(bytes),
-            Some(1) => GenericPayloadWrapper::Broadcast(bytes),
-            _ => GenericPayloadWrapper::Broadcast(bytes),
-        }
-    }
-
     fn into_bytes(self) -> Vec<u8> {
-        let append_byte = |mut bytes: Vec<u8>, byte: u8| -> Vec<u8> {
-            bytes.push(byte);
-            bytes
-        };
-
         match self {
-            GenericPayloadWrapper::Direct(bytes) => append_byte(bytes, 0),
-            GenericPayloadWrapper::Broadcast(bytes) => append_byte(bytes, 1),
+            GenericPayloadWrapper::Direct(bytes) => bytes,
+            GenericPayloadWrapper::Broadcast(bytes) => bytes
         }
     }
 
     fn is_broadcast(&self) -> bool {
         matches!(self, GenericPayloadWrapper::Broadcast(..))
+    }
+
+    fn broadcast_marker(&self) -> u8 {
+        match self {
+            GenericPayloadWrapper::Direct(_) => 0,
+            GenericPayloadWrapper::Broadcast(_) => 1
+        }
     }
 }
 
@@ -1053,10 +1047,15 @@ impl RequestResponseCodec for GenericCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
+        let is_broadcast = unsigned_varint::aio::read_u8(&mut io)
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
         // Read the length.
         let length = unsigned_varint::aio::read_usize(&mut io)
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
         if length > usize::try_from(self.max_request_size).unwrap_or(usize::MAX) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1070,7 +1069,12 @@ impl RequestResponseCodec for GenericCodec {
         // Read the payload.
         let mut buffer = vec![0; length];
         io.read_exact(&mut buffer).await?;
-        Ok(GenericPayloadWrapper::from_bytes(buffer))
+
+        match is_broadcast {
+            0 => Ok(GenericPayloadWrapper::Direct(buffer)),
+            1 => Ok(GenericPayloadWrapper::Broadcast(buffer)),
+            _ => Ok(GenericPayloadWrapper::Broadcast(buffer)), // todo: proper error handing
+        }
     }
 
     async fn read_response<T>(
@@ -1122,9 +1126,15 @@ impl RequestResponseCodec for GenericCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        // Write broadcast marker
+        {
+            let mut buffer = unsigned_varint::encode::u8_buffer();
+            io.write_all(unsigned_varint::encode::u8(req.broadcast_marker(), &mut buffer))
+                .await?;
+        }
+
         let req = req.into_bytes();
 
-        // TODO: check the length?
         // Write the length.
         {
             let mut buffer = unsigned_varint::encode::usize_buffer();
