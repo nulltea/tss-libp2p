@@ -7,10 +7,6 @@
     {
       "name": "player_2",
       "network_peer": "/ip4/127.0.0.1/tcp/4002/p2p/12D3KooWJJM7NBXH5BMi5fyQQ46cZAasBudcAi1NqnwkRsGe4FyH"
-    },
-    {
-      "name": "player_1",
-      "network_peer": "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWQJp9qmKzMabGNZrVEvxeEEJZZK74mpqrAhYkAhtZmCNF"
     }
   ]
 }

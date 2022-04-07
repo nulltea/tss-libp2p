@@ -252,8 +252,9 @@ impl NetworkWorker {
                                 )
                             }
                             NetworkMessage::SendDirect(protocol, receiver_index, message) => {
-                                if let Ok(receiver_peer) = self.peerset.clone().peer_at_index(receiver_index).await
+                                if let Some(receiver_peer) = behaviour.peer_at_index(receiver_index as usize)
                                 {
+                                    error!("sending direct message to index {} peer {:?}", receiver_index, receiver_peer);
                                     behaviour.message_broadcast.send_message(
                                         &receiver_peer,
                                         &protocol,
@@ -267,10 +268,10 @@ impl NetworkWorker {
                             }
                         }
 
-                        match rx.await {
-                            Ok(_v) => continue,
-                            Err(_) => error!("failed to wait for response"),
-                        }
+                        // match rx.await {
+                        //     Ok(_v) => continue,
+                        //     Err(e) => error!("failed to wait for response {}", e),
+                        // }
                     }
                     None => { break; }
                 }

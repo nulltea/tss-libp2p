@@ -84,7 +84,7 @@ impl ProtocolConfig {
             name,
             max_request_size: 8 * 1024 * 1024,
             max_response_size: 10 * 1024,
-            request_timeout: Duration::from_secs(20),
+            request_timeout: Duration::from_secs(30),
             inbound_queue: Some(inbound_sender),
         }
     }

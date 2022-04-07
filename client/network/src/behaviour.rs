@@ -160,6 +160,10 @@ impl Behaviour {
     pub fn peer_membership(&self, peer_id: &PeerId) -> mpc_peerset::MembershipState {
         self.peerset.state().peer_membership(peer_id)
     }
+
+    pub fn peer_at_index(&self, index: usize) -> Option<PeerId> {
+        self.peerset.state().at_index(index)
+    }
 }
 
 impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour {
@@ -180,10 +184,10 @@ impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour {
                 result,
             } => {
                 debug!(
-                    "broadcast for protocol {:?} finished to {:?} peer: {:?} took: {:?}",
+                    "broadcast for protocol {:?} finished with {:?} peer: {:?} took: {:?}",
                     protocol.to_string(),
-                    peer,
                     result,
+                    peer,
                     duration
                 );
             }

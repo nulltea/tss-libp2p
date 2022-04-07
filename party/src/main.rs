@@ -20,7 +20,12 @@ use std::error::Error;
 use std::fs::File;
 use std::io::Write;
 use std::str::FromStr;
-use std::{env, fs};
+use std::{env, fs, io};
+use std::fmt::Debug;
+use log::info;
+use mpc_p2p::broadcast::OutgoingResponse;
+
+const KEYGEN_PROTOCOL_ID: &str = "/keygen/0.1.0";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -36,9 +41,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut config = Config::load_config("config.json").or_else(|_| generate_config(3))?;
     let local_party_addr = config.addr_of_peer_id(local_peer_id).unwrap();
+    let parties_count = config.parties.len();
 
     let (keygen_config, keygen_receiver) =
-        broadcast::ProtocolConfig::new_with_receiver("/keygen/0.1.0".into(), config.parties.len() - 1);
+        broadcast::ProtocolConfig::new_with_receiver(KEYGEN_PROTOCOL_ID.into(), config.parties.len() - 1);
 
     let (net_worker, net_service) = {
         let network_peers = config.parties.into_iter()
@@ -74,9 +80,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     pin_mut!(incoming, outgoing);
 
-    println!("local party index: {}", index + 1);
+    println!("local party index: {} parties count {}", index + 1, parties_count);
 
-    let keygen = Keygen::new(index + 1, 2, 3)?;
+    println!("press any key to start keygen");
+    let mut s = String::new();
+    io::stdin().read_line(&mut s)?;
+    let keygen = Keygen::new(index + 1, 1, parties_count as u16)?;
     let output = AsyncProtocol::new(keygen, incoming, outgoing)
         .run()
         .await
@@ -101,19 +110,20 @@ pub async fn join_computation<M>(
     impl Sink<Msg<M>, Error = anyhow::Error>,
 )
 where
-    M: Serialize + DeserializeOwned,
+    M: Serialize + DeserializeOwned + Debug,
 {
     let index = network_service.local_peer_index().await;
 
     let outgoing = futures::sink::unfold(
         network_service.clone(),
         |network_service, message: Msg<M>| async move {
+            info!("outgoing message to {:?}", message);
             let payload = serde_ipld_dagcbor::to_vec(&message.body)?; // todo: abstract serialization
 
             if let Some(receiver_index) = message.receiver {
-                network_service.send_message("keygen", receiver_index - 1, payload).await;
+                network_service.send_message(KEYGEN_PROTOCOL_ID.into(), receiver_index - 1, payload).await;
             } else {
-                network_service.broadcast_message("/keygen/0.1.0", payload).await;
+                network_service.broadcast_message(KEYGEN_PROTOCOL_ID.into(), payload).await;
             }
 
             Ok::<_, anyhow::Error>(network_service)
@@ -122,12 +132,19 @@ where
 
     let incoming = incoming_receiver.map(move |message: broadcast::IncomingMessage| {
         let body: M = serde_ipld_dagcbor::from_slice(&*message.payload)?;
+        message.pending_response.send(OutgoingResponse{
+            result: Ok(vec![]),
+            reputation_changes: vec![],
+            sent_feedback: None
+        });
+        info!("incoming message from {} => {:?}", message.peer_index + 1, body);
+
         Ok(Msg {
             sender: message.peer_index + 1,
             receiver: if message.is_broadcast {
                 None
             } else {
-                Some(message.peer_index)
+                Some(index + 1)
             },
             body,
         })

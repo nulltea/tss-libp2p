@@ -134,14 +134,15 @@ impl PeersState {
     }
 
     /// Returns the index of a specified peer in a given set.
-    pub fn at_index(&self, index: usize) -> Option<&PeerId> {
+    pub fn at_index(&self, index: usize) -> Option<PeerId> {
         let peers: Vec<&PeerId> = self.nodes
             .iter()
             .map(|(p, _)| p)
+            .sorted_by_key(|p| p.to_bytes())
             .collect();
 
         if peers.len() > index {
-            Some(peers[index])
+            Some(peers[index].clone())
         } else {
             None
         }

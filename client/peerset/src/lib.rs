@@ -322,7 +322,7 @@ impl Peerset {
 
     fn get_peer_id(&mut self, index: u16, pending_result: oneshot::Sender<PeerId>) {
         if let Some(peer) = self.data.at_index(index as usize) {
-            let _ = pending_result.send(peer.clone());
+            let _ = pending_result.send(peer);
         } else {
             drop(pending_result)
         }
