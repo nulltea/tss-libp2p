@@ -1,10 +1,9 @@
 use anyhow::anyhow;
 use libp2p::{Multiaddr, PeerId};
-use mpc_p2p::{broadcast, MultiaddrWithPeerId};
+use mpc_p2p::{MultiaddrWithPeerId};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {

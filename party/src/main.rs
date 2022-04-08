@@ -1,13 +1,14 @@
 mod config;
 
 use crate::config::{Config, PartyConfig};
-use crate::identity::Keypair;
 use anyhow::anyhow;
 use async_std::prelude::Stream;
 use async_std::task;
 use futures::channel::mpsc;
 use futures::{pin_mut, Sink, StreamExt};
-use libp2p::{identity, Multiaddr, PeerId};
+use libp2p::{Multiaddr, PeerId};
+use log::info;
+use mpc_p2p::broadcast::OutgoingResponse;
 use mpc_p2p::{
     broadcast, MultiaddrWithPeerId, NetworkConfig, NetworkService, NetworkWorker, NodeKeyConfig,
     Params, Secret,
@@ -17,13 +18,11 @@ use round_based::{AsyncProtocol, Msg};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::error::Error;
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::Write;
 use std::str::FromStr;
 use std::{env, fs, io};
-use std::fmt::Debug;
-use log::info;
-use mpc_p2p::broadcast::OutgoingResponse;
 
 const KEYGEN_PROTOCOL_ID: &str = "/keygen/0.1.0";
 
@@ -39,20 +38,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let local_peer_id = PeerId::from(node_key.clone().into_keypair()?.public());
 
-    let mut config = Config::load_config("config.json").or_else(|_| generate_config(3))?;
+    let config = Config::load_config("config.json").or_else(|_| generate_config(3))?;
     let local_party_addr = config.addr_of_peer_id(local_peer_id).unwrap();
     let parties_count = config.parties.len();
 
-    let (keygen_config, keygen_receiver) =
-        broadcast::ProtocolConfig::new_with_receiver(KEYGEN_PROTOCOL_ID.into(), config.parties.len() - 1);
+    let (keygen_config, keygen_receiver) = broadcast::ProtocolConfig::new_with_receiver(
+        KEYGEN_PROTOCOL_ID.into(),
+        config.parties.len() - 1,
+    );
 
     let (net_worker, net_service) = {
-        let network_peers = config.parties.into_iter()
-            .map(|p| p.network_peer);
-        let network_config = NetworkConfig::new(
-            local_party_addr,
-            network_peers
-        );
+        let network_peers = config.parties.into_iter().map(|p| p.network_peer);
+        let network_config = NetworkConfig::new(local_party_addr, network_peers);
 
         for peer in network_config.initial_peers.iter() {
             println!("peer: {}", peer)
@@ -73,14 +70,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         net_worker.run().await;
     });
 
-    let (index, incoming, outgoing) = join_computation(net_service, keygen_receiver)
-        .await;
+    let (index, incoming, outgoing) = join_computation(net_service, keygen_receiver).await;
 
     let incoming = incoming.fuse();
 
     pin_mut!(incoming, outgoing);
 
-    println!("local party index: {} parties count {}", index + 1, parties_count);
+    println!(
+        "local party index: {} parties count {}",
+        index + 1,
+        parties_count
+    );
 
     println!("press any key to start keygen");
     let mut s = String::new();
@@ -121,9 +121,13 @@ where
             let payload = serde_ipld_dagcbor::to_vec(&message.body)?; // todo: abstract serialization
 
             if let Some(receiver_index) = message.receiver {
-                network_service.send_message(KEYGEN_PROTOCOL_ID.into(), receiver_index - 1, payload).await;
+                network_service
+                    .send_message(KEYGEN_PROTOCOL_ID.into(), receiver_index - 1, payload)
+                    .await;
             } else {
-                network_service.broadcast_message(KEYGEN_PROTOCOL_ID.into(), payload).await;
+                network_service
+                    .broadcast_message(KEYGEN_PROTOCOL_ID.into(), payload)
+                    .await;
             }
 
             Ok::<_, anyhow::Error>(network_service)
@@ -132,12 +136,15 @@ where
 
     let incoming = incoming_receiver.map(move |message: broadcast::IncomingMessage| {
         let body: M = serde_ipld_dagcbor::from_slice(&*message.payload)?;
-        message.pending_response.send(OutgoingResponse{
+        message.pending_response.send(OutgoingResponse {
             result: Ok(vec![]),
-            reputation_changes: vec![],
-            sent_feedback: None
+            sent_feedback: None,
         });
-        info!("incoming message from {} => {:?}", message.peer_index + 1, body);
+        info!(
+            "incoming message from {} => {:?}",
+            message.peer_index + 1,
+            body
+        );
 
         Ok(Msg {
             sender: message.peer_index + 1,
@@ -172,7 +179,7 @@ fn generate_config(n: u32) -> Result<Config, anyhow::Error> {
         })
     }
 
-    let mut config = Config { parties };
+    let config = Config { parties };
 
     let json_bytes = serde_json::to_vec(&config)
         .map_err(|e| anyhow!("config encoding terminated with err: {}", e))?;

@@ -1,52 +1,31 @@
-// This file was a part of Substrate.
-// broadcast.rc <> request_response.rc
-
-// Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-
 use crate::broadcast;
 use futures::channel::oneshot;
-use libp2p::swarm::NetworkBehaviourEventProcess;
-use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
-use libp2p::{Multiaddr, NetworkBehaviour};
-use libp2p::PeerId;
-use log::{debug, error, info, trace, warn};
-use mpc_peerset::Peerset;
-use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::identity::Keypair;
-use libp2p::ping::{Ping, PingConfig, PingEvent, PingFailure, PingSuccess};
+use libp2p::swarm::{CloseConnection, NetworkBehaviourEventProcess};
+use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
+use libp2p::PeerId;
+use libp2p::{NetworkBehaviour};
+use log::{debug, error, trace, warn};
+use mpc_peerset::Peerset;
+use std::borrow::Cow;
+use std::collections::VecDeque;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+const MPC_PROTOCOL_ID: &str = "/mpc/0.1.0";
+
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "BehaviourOut", poll_method = "poll", event_process = true)]
 pub(crate) struct Behaviour {
     pub message_broadcast: broadcast::GenericBroadcast,
-    // ping: Ping,
     identify: Identify,
 
     #[behaviour(ignore)]
     events: VecDeque<BehaviourOut>,
     #[behaviour(ignore)]
     peerset: Peerset,
-    #[behaviour(ignore)]
-    addresses: HashMap<PeerId, Multiaddr>,
 }
 
 pub(crate) enum BehaviourOut {
@@ -63,18 +42,18 @@ impl Behaviour {
         local_key: &Keypair,
         broadcast_protocols: Vec<broadcast::ProtocolConfig>,
         peerset: Peerset,
-        addresses: HashMap<PeerId, Multiaddr>
     ) -> Result<Behaviour, broadcast::RegisterError> {
         Ok(Behaviour {
             message_broadcast: broadcast::GenericBroadcast::new(
                 broadcast_protocols.into_iter(),
                 peerset.get_handle(),
             )?,
-            // ping: Ping::new(PingConfig::new().with_keep_alive(true)),
-            identify: Identify::new(IdentifyConfig::new("mpc/0.1.0".into(), local_key.public())),
+            identify: Identify::new(IdentifyConfig::new(
+                MPC_PROTOCOL_ID.into(),
+                local_key.public(),
+            )),
             events: VecDeque::new(),
             peerset,
-            addresses
         })
     }
 
@@ -117,16 +96,22 @@ impl Behaviour {
     {
         loop {
             match futures::Stream::poll_next(Pin::new(&mut self.peerset), cx) {
-                Poll::Ready(Some(mpc_peerset::Message::Connect(peer_id))) => {
-                    // todo: self.peerset_report_connect(peer_id);
-                },
+                Poll::Ready(Some(mpc_peerset::Message::Connect(addr))) => {
+                    return Poll::Ready(NetworkBehaviourAction::DialAddress{
+                        address: addr,
+                        handler: self.new_handler(),
+                    })
+                }
                 Poll::Ready(Some(mpc_peerset::Message::Drop(peer_id))) => {
-                    // todo: self.peerset_report_disconnect(peer_id, set_id);
-                },
+                    return Poll::Ready(NetworkBehaviourAction::CloseConnection{
+                        peer_id,
+                        connection: CloseConnection::All,
+                    })
+                }
                 Poll::Ready(None) => {
                     error!(target: "sub-libp2p", "Peerset receiver stream has returned None");
-                    break
-                },
+                    break;
+                }
                 Poll::Pending => break,
             }
         }
@@ -144,7 +129,10 @@ impl Behaviour {
             if not_connected.try_accept_peer().is_ok() {
                 debug!("Peer {} marked as connected", peer_id.to_base58());
             } else {
-                warn!("Peer {} was already marked as connected", peer_id.to_base58());
+                warn!(
+                    "Peer {} was already marked as connected",
+                    peer_id.to_base58()
+                );
             }
         }
     }
@@ -191,37 +179,6 @@ impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour {
                     duration
                 );
             }
-            broadcast::Event::ReputationChanges { peer, changes } => {
-                for change in changes {
-                    debug!("reputation changed for {:?} peer: {:?}", peer, change);
-                }
-            }
-        }
-    }
-}
-
-impl NetworkBehaviourEventProcess<PingEvent> for Behaviour {
-    fn inject_event(&mut self, event: PingEvent) {
-        match event.result {
-            Ok(PingSuccess::Ping { rtt }) => {
-                trace!(
-                    "PingSuccess::Ping rtt to {} is {} ms",
-                    event.peer.to_base58(),
-                    rtt.as_millis()
-                );
-            }
-            Ok(PingSuccess::Pong) => {
-                trace!("PingSuccess::Pong from {}", event.peer.to_base58());
-            }
-            Err(PingFailure::Timeout) => {
-                debug!("PingFailure::Timeout {}", event.peer.to_base58());
-            }
-            Err(PingFailure::Other { error }) => {
-                debug!("PingFailure::Other {}: {}", event.peer.to_base58(), error);
-            }
-            Err(PingFailure::Unsupported) => {
-                debug!("PingFailure::Unsupported {}", event.peer.to_base58());
-            }
         }
     }
 }
@@ -230,10 +187,10 @@ impl NetworkBehaviourEventProcess<IdentifyEvent> for Behaviour {
     fn inject_event(&mut self, event: IdentifyEvent) {
         match event {
             IdentifyEvent::Received { peer_id, info } => {
-                trace!("Identified Peer {:?}", peer_id);
+                trace!("identified peer {:?}", peer_id);
                 trace!("protocol_version {:?}", info.protocol_version);
                 trace!("agent_version {:?}", info.agent_version);
-                trace!("listening_ addresses {:?}", info.listen_addrs);
+                trace!("listen_addresses {:?}", info.listen_addrs);
                 trace!("observed_address {:?}", info.observed_addr);
                 trace!("protocols {:?}", info.protocols);
             }

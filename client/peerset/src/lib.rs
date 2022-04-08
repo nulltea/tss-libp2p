@@ -20,26 +20,17 @@ mod peer;
 mod state;
 
 use futures::{channel::mpsc, channel::oneshot, prelude::*};
-use libp2p::PeerId;
-use log::{debug, error, trace};
-use serde_json::json;
+use libp2p::{Multiaddr, PeerId};
+use log::{debug};
+use std::collections::HashSet;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     pin::Pin,
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Instant,
 };
-use std::collections::HashSet;
 
 pub use crate::peer::*;
-
-/// We don't accept nodes whose reputation is under this value.
-pub const BANNED_THRESHOLD: i32 = 82 * (i32::MIN / 100);
-/// Reputation change for a node when we get disconnected from it.
-const DISCONNECT_REPUTATION_CHANGE: i32 = -256;
-/// Amount of time between the moment we disconnect from a node and the moment we remove it from
-/// the list.
-const FORGET_AFTER: Duration = Duration::from_secs(3600);
 
 #[derive(Debug)]
 enum Action {
@@ -47,8 +38,6 @@ enum Action {
     RemoveFromPeersSet(PeerId),
     GetPeerIndex(PeerId, oneshot::Sender<u16>),
     GetPeerAtIndex(u16, oneshot::Sender<PeerId>),
-    ReportPeer(PeerId, ReputationChange),
-    GetPeerReputation(PeerId, oneshot::Sender<(u16, i32)>),
 }
 
 /// Shared handle to the peer set manager (PSM). Distributed around the code.
@@ -58,25 +47,14 @@ pub struct PeersetHandle {
 }
 
 impl PeersetHandle {
-    /// Reports an adjustment to the reputation of the given peer.
-    pub fn report_peer(&self, peer_id: PeerId, score_diff: ReputationChange) {
-        let _ = self
-            .tx
-            .unbounded_send(Action::ReportPeer(peer_id, score_diff));
-    }
-
     /// Add a peer to the set.
     pub fn add_to_peers_set(&self, peer_id: PeerId) {
-        let _ = self
-            .tx
-            .unbounded_send(Action::AddToPeersSet(peer_id));
+        let _ = self.tx.unbounded_send(Action::AddToPeersSet(peer_id));
     }
 
     /// Remove a peer from the set.
     pub fn remove_from_peers_set(&self, peer_id: PeerId) {
-        let _ = self
-            .tx
-            .unbounded_send(Action::RemoveFromPeersSet(peer_id));
+        let _ = self.tx.unbounded_send(Action::RemoveFromPeersSet(peer_id));
     }
 
     /// Returns the index of the peer.
@@ -100,16 +78,6 @@ impl PeersetHandle {
         // due to that peer not being a part of the set.
         rx.await.map_err(|_| ())
     }
-
-    /// Returns the reputation value of the peer.
-    pub async fn peer_reputation(self, peer_id: PeerId) -> Result<(u16, i32), ()> {
-        let (tx, rx) = oneshot::channel();
-
-        let _ = self.tx.unbounded_send(Action::GetPeerReputation(peer_id, tx));
-
-        // The channel can only be closed if the peerset no longer exists.
-        rx.await.map_err(|_| ())
-    }
 }
 
 /// Message that can be sent by the peer set manager (PSM).
@@ -117,7 +85,7 @@ impl PeersetHandle {
 pub enum Message {
     /// Request to open a connection to the given peer. From the point of view of the PSM, we are
     /// immediately connected.
-    Connect(PeerId),
+    Connect(Multiaddr),
 
     /// Drop the connection to the given peer, or cancel the connection attempt after a `Connect`.
     Drop(PeerId),
@@ -186,7 +154,6 @@ pub(crate) struct SetInfo {
     // States that peerset is locked and won't accept any more peers and changes.
     pub static_set: bool,
 }
-
 
 /// Side of the peer set manager owned by the network. In other words, the "receiving" side.
 ///
@@ -281,37 +248,6 @@ impl Peerset {
         }
     }
 
-    fn on_report_peer(&mut self, peer_id: PeerId, change: ReputationChange) {
-        let mut reputation = self.data.peer_reputation(peer_id);
-        reputation.add_reputation(change.value);
-        if reputation.reputation() >= BANNED_THRESHOLD {
-            trace!(target: "peerset", "Report {}: {:+} to {}. Reason: {}",
-                peer_id, change.value, reputation.reputation(), change.reason
-            );
-            return;
-        }
-
-        debug!(target: "peerset", "Report {}: {:+} to {}. Reason: {}, Disconnecting",
-            peer_id, change.value, reputation.reputation(), change.reason
-        );
-
-        drop(reputation);
-
-        if let Peer::Connected(peer) = self.data.peer(&peer_id) {
-            let peer = peer.disconnect();
-            self.message_queue.push_back(Message::Drop(peer.into_peer_id()));
-        }
-    }
-
-    fn get_peer_reputation(&mut self, peer_id: PeerId, pending_result: oneshot::Sender<(u16, i32)>) {
-        if let Some(index) = self.data.index_of(peer_id) {
-            let reputation = self.data.peer_reputation(peer_id);
-            let _ = pending_result.send((index as u16, reputation.reputation()));
-        } else {
-            drop(pending_result)
-        }
-    }
-
     fn get_peer_index(&mut self, peer_id: PeerId, pending_result: oneshot::Sender<u16>) {
         if let Some(index) = self.data.index_of(peer_id) {
             let _ = pending_result.send(index as u16);
@@ -326,16 +262,6 @@ impl Peerset {
         } else {
             drop(pending_result)
         }
-    }
-
-    /// Reports an adjustment to the reputation of the given peer.
-    pub fn report_peer(&mut self, peer_id: PeerId, score_diff: ReputationChange) {
-        // We don't immediately perform the adjustments in order to have state consistency. We
-        // don't want the reporting here to take priority over messages sent using the
-        // `PeersetHandle`.
-        let _ = self
-            .tx
-            .unbounded_send(Action::ReportPeer(peer_id, score_diff));
     }
 
     /// Returns the number of peers that we have discovered.
@@ -360,23 +286,13 @@ impl Stream for Peerset {
             };
 
             match action {
-                Action::AddToPeersSet(peer_id) => {
-                    self.add_to_peers_set(peer_id)
-                }
-                Action::RemoveFromPeersSet(peer_id) => {
-                    self.on_remove_from_peers_set(peer_id)
-                }
+                Action::AddToPeersSet(peer_id) => self.add_to_peers_set(peer_id),
+                Action::RemoveFromPeersSet(peer_id) => self.on_remove_from_peers_set(peer_id),
                 Action::GetPeerIndex(peer_id, pending_result) => {
                     self.get_peer_index(peer_id, pending_result)
                 }
                 Action::GetPeerAtIndex(index, pending_result) => {
                     self.get_peer_id(index, pending_result)
-                }
-                Action::ReportPeer(peer_id, score_diff) => {
-                    self.on_report_peer(peer_id, score_diff)
-                }
-                Action::GetPeerReputation(peer_id, pending_result) => {
-                    self.get_peer_reputation(peer_id, pending_result)
                 }
             }
         }

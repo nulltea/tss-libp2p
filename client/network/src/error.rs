@@ -2,9 +2,6 @@ use libp2p::{Multiaddr, PeerId};
 use std::borrow::Cow;
 use std::fmt;
 
-/// Result type alias for the network.
-pub type Result<T> = std::result::Result<T, Error>;
-
 /// Error type for the network.
 #[derive(derive_more::Display, derive_more::From)]
 pub enum Error {

@@ -16,59 +16,33 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+use crate::{
+    ConnectedPeer, MembershipState, NotConnectedPeer, Peer, PeersetConfig, SetInfo, UnknownPeer,
+};
+use itertools::Itertools;
 use libp2p::PeerId;
-use log::error;
 use std::{
     borrow::Cow,
     collections::{
-        hash_map::{Entry, OccupiedEntry},
-        HashMap, HashSet,
+        hash_map::OccupiedEntry,
+        HashMap,
     },
-    time::Instant,
 };
-use itertools::Itertools;
-use crate::{ConnectedPeer, NotConnectedPeer, Peer, Reputation, PeersetConfig, SetInfo, UnknownPeer, MembershipState};
 
 /// State storage behind the peerset.
 ///
 /// # Usage
 ///
 /// This struct is nothing more but a data structure containing a list of nodes, where each node
-/// has a reputation and is either connected to us or not.
+/// is either connected to us or not.
 #[derive(Debug, Clone)]
 pub struct PeersState {
     local_peer_id: PeerId,
     /// List of nodes that we know about.
-    ///
-    /// > **Note**: This list should really be ordered by decreasing reputation, so that we can
-    ///           easily select the best node to connect to. As a first draft, however, we don't
-    ///           sort, to make the logic easier.
-    pub(crate) nodes: HashMap<PeerId, Node>,
+    pub(crate) nodes: HashMap<PeerId, MembershipState>,
 
     /// Configuration of the set.
     pub(crate) set: SetInfo,
-}
-
-/// State of a single node that we know about.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Node {
-    /// List of sets the node belongs to.
-    /// Always has a fixed size equal to the one of [`PeersState::set`]. The various possible sets
-    /// are indices into this `Vec`.
-    pub(crate) set: MembershipState,
-
-    /// Reputation value of the node, between `i32::MIN` (we hate that node) and
-    /// `i32::MAX` (we love that node).
-    pub(crate) reputation: i32,
-}
-
-impl Node {
-    pub fn new() -> Self {
-        Self {
-            set: MembershipState::NotMember,
-            reputation: 0,
-        }
-    }
 }
 
 impl PeersState {
@@ -86,23 +60,9 @@ impl PeersState {
         }
     }
 
-    /// Returns an object that grants access to the reputation value of a peer.
-    pub fn peer_reputation(&mut self, peer_id: PeerId) -> Reputation {
-        if !self.nodes.contains_key(&peer_id) {
-            self.nodes.insert(peer_id, Node::new());
-        }
-
-        let entry = match self.nodes.entry(peer_id) {
-            Entry::Vacant(_) => unreachable!("guaranteed to be inserted above; qed"),
-            Entry::Occupied(e) => e,
-        };
-
-        Reputation { node: Some(entry) }
-    }
-
     /// Returns an object that grants access to the state of a peer in the context of the set.
     pub fn peer<'a>(&'a mut self, peer_id: &'a PeerId) -> Peer<'a> {
-        match self.nodes.get(peer_id).map(|p| &p.set) {
+        match self.nodes.get(peer_id).map(|s| *s) {
             None | Some(MembershipState::NotMember) => Peer::Unknown(UnknownPeer {
                 parent: self,
                 peer_id: Cow::Borrowed(peer_id),
@@ -127,7 +87,8 @@ impl PeersState {
 
     /// Returns the index of a specified peer in a given set.
     pub fn index_of(&self, peer: PeerId) -> Option<usize> {
-        self.nodes.iter()
+        self.nodes
+            .iter()
             .map(|(p, _)| p)
             .sorted_by_key(|p| p.to_bytes())
             .position(|elem| *elem == peer)
@@ -135,7 +96,8 @@ impl PeersState {
 
     /// Returns the index of a specified peer in a given set.
     pub fn at_index(&self, index: usize) -> Option<PeerId> {
-        let peers: Vec<&PeerId> = self.nodes
+        let peers: Vec<&PeerId> = self
+            .nodes
             .iter()
             .map(|(p, _)| p)
             .sorted_by_key(|p| p.to_bytes())
@@ -152,9 +114,8 @@ impl PeersState {
     pub fn connected_peers(&self) -> impl Iterator<Item = &PeerId> {
         self.nodes
             .iter()
-            .filter(move |(p, n)| {
-                n.set.is_connected() && p.to_bytes() != self.local_peer_id.to_bytes()
-            }).map(|(p, _)| p)
+            .filter(move |(p, n)| n.is_connected() && p.to_bytes() != self.local_peer_id.to_bytes())
+            .map(|(p, _)| p)
     }
 
     /// Returns peer's membership state in the set.
@@ -162,31 +123,7 @@ impl PeersState {
         self.nodes
             .iter()
             .find(move |(p, _)| p.to_bytes() != peer_id.to_bytes())
-            .map(|(_, n)| n.set)
+            .map(|(_, s)| *s)
             .unwrap_or(MembershipState::NotMember)
-    }
-
-    /// Returns the peer with the highest reputation and that we are not connected to.
-    ///
-    /// If multiple nodes have the same reputation, which one is returned is unspecified.
-    pub fn highest_not_connected_peer(&mut self) -> Option<NotConnectedPeer> {
-        let outcome = self
-            .nodes
-            .iter_mut()
-            .filter(|(_, Node { set, .. })| set.is_not_connected())
-            .fold(None::<(&PeerId, &mut Node)>, |mut cur_node, to_try| {
-                if let Some(cur_node) = cur_node.take() {
-                    if cur_node.1.reputation >= to_try.1.reputation {
-                        return Some(cur_node);
-                    }
-                }
-                Some(to_try)
-            })
-            .map(|(peer_id, _)| *peer_id);
-
-        outcome.map(move |peer_id| NotConnectedPeer {
-            state: self,
-            peer_id: Cow::Owned(peer_id),
-        })
     }
 }

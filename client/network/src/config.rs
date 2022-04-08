@@ -1,15 +1,14 @@
 use crate::broadcast;
+use anyhow::anyhow;
 use libp2p::identity::{ed25519, Keypair};
 use libp2p::{multiaddr, Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::error::Error;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fmt, fs, io};
-use std::collections::HashMap;
-use anyhow::anyhow;
 use zeroize::Zeroize;
 
 pub struct Params {
@@ -39,7 +38,8 @@ impl NetworkConfig {
     }
 
     pub fn into_peers_hashmap(self) -> HashMap<PeerId, Multiaddr> {
-        self.initial_peers.into_iter()
+        self.initial_peers
+            .into_iter()
             .map(|ip| (ip.peer_id, ip.multiaddr))
             .collect()
     }
@@ -147,7 +147,9 @@ impl From<MultiaddrWithPeerId> for String {
 impl TryFrom<String> for MultiaddrWithPeerId {
     type Error = anyhow::Error;
     fn try_from(string: String) -> Result<Self, Self::Error> {
-        string.parse().map_err(|e| anyhow!("parsing multiaddr_peer_id terminated with err: {}", e))
+        string
+            .parse()
+            .map_err(|e| anyhow!("parsing multiaddr_peer_id terminated with err: {}", e))
     }
 }
 
@@ -161,14 +163,14 @@ pub fn parse_str_addr(addr_str: &str) -> Result<(PeerId, Multiaddr), anyhow::Err
 /// Splits a Multiaddress into a Multiaddress and PeerId.
 pub fn parse_addr(mut addr: Multiaddr) -> Result<(PeerId, Multiaddr), anyhow::Error> {
     let who = match addr.pop() {
-        Some(multiaddr::Protocol::P2p(key)) =>
-            PeerId::from_multihash(key).map_err(|_| anyhow!("invalid peer id"))?,
+        Some(multiaddr::Protocol::P2p(key)) => {
+            PeerId::from_multihash(key).map_err(|_| anyhow!("invalid peer id"))?
+        }
         _ => return Err(anyhow!("peer id missing")),
     };
 
     Ok((who, addr))
 }
-
 
 // impl Eq for MultiaddrWithPeerId {}
 //

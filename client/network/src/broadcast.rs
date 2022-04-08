@@ -1,3 +1,22 @@
+// This file was a part of Substrate.
+// broadcast.rc <> request_response.rc
+
+// Copyright (C) 2019-2022 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
@@ -28,9 +47,7 @@ use std::{
 
 pub use libp2p::request_response::{InboundFailure, OutboundFailure, RequestId};
 use log::error;
-use mpc_peerset::{PeersetHandle, ReputationChange};
-
-const BANNED_THRESHOLD: i32 = 82 * (i32::MIN / 100);
+use mpc_peerset::PeersetHandle;
 
 /// Configuration for a single request-response protocol.
 #[derive(Debug, Clone)]
@@ -55,26 +72,7 @@ pub struct ProtocolConfig {
     /// If you expect the response to come back quickly, you should set this to a smaller duration.
     pub request_timeout: Duration,
 
-    /// Channel on which the networking service will send incoming requests.
-    ///
-    /// Every time a peer sends a request to the local node using this protocol, the networking
-    /// service will push an element on this channel. The receiving side of this channel then has
-    /// to pull this element, process the request, and send back the response to send back to the
-    /// peer.
-    ///
-    /// The size of the channel has to be carefully chosen. If the channel is full, the networking
-    /// service will discard the incoming request send back an error to the peer. Consequently,
-    /// the channel being full is an indicator that the node is overloaded.
-    ///
-    /// You can typically set the size of the channel to `T / d`, where `T` is the
-    /// `request_timeout` and `d` is the expected average duration of CPU and I/O it takes to
-    /// build a response.
-    ///
-    /// Can be `None` if the local node does not support answering incoming requests.
-    /// If this is `None`, then the local node will not advertise support for this protocol towards
-    /// other peers. If this is `Some` but the channel is closed, then the local node will
-    /// advertise support for this protocol, but any incoming request will lead to an error being
-    /// sent back.
+    /// Channel on which the networking service will send incoming messages.
     pub inbound_queue: Option<mpsc::Sender<IncomingMessage>>,
 }
 
@@ -84,7 +82,7 @@ impl ProtocolConfig {
             name,
             max_request_size: 8 * 1024 * 1024,
             max_response_size: 10 * 1024,
-            request_timeout: Duration::from_secs(30),
+            request_timeout: Duration::from_secs(20),
             inbound_queue: Some(inbound_sender),
         }
     }
@@ -113,13 +111,6 @@ pub struct IncomingMessage {
     pub is_broadcast: bool,
 
     /// Channel to send back the response.
-    ///
-    /// There are two ways to indicate that handling the request failed:
-    ///
-    /// 1. Drop `pending_response` and thus not changing the reputation of the peer.
-    ///
-    /// 2. Sending an `Err(())` via `pending_response`, optionally including reputation changes for
-    /// the given peer.
     pub pending_response: oneshot::Sender<OutgoingResponse>,
 }
 
@@ -130,10 +121,6 @@ pub struct OutgoingResponse {
     ///
     /// `Err(())` if none is available e.g. due an error while handling the request.
     pub result: Result<Vec<u8>, ()>,
-
-    /// Reputation changes accrued while handling the request. To be applied to the reputation of
-    /// the peer sending the request.
-    pub reputation_changes: Vec<ReputationChange>,
 
     /// If provided, the `oneshot::Sender` will be notified when the request has been sent to the
     /// peer.
@@ -158,9 +145,6 @@ pub enum Event {
         /// Name of the protocol in question.
         protocol: Cow<'static, str>,
         /// Whether handling the request was successful or unsuccessful.
-        ///
-        /// When successful contains the time elapsed between when we received the request and when
-        /// we sent back the response. When unsuccessful contains the failure reason.
         result: Result<Duration, ResponseFailure>,
     },
 
@@ -177,12 +161,6 @@ pub enum Event {
         duration: Duration,
         /// Result of the request.
         result: Result<(), RequestFailure>,
-    },
-
-    /// A request protocol handler issued reputation changes for the given peer.
-    ReputationChanges {
-        peer: PeerId,
-        changes: Vec<ReputationChange>,
     },
 }
 
@@ -262,7 +240,7 @@ pub struct GenericBroadcast {
 
     /// Pending message request, holds `MessageRequest` as a Future state to poll it
     /// until we get a response from `Peerset`
-    message_request: Option<BroadcastMessage>,
+    message_wip: Option<BroadcastMessage>,
 }
 
 // This is a state of processing incoming request Message.
@@ -276,7 +254,7 @@ struct BroadcastMessage {
     resp_builder: Option<futures::channel::mpsc::Sender<IncomingMessage>>,
     // Once we get incoming request we save all params, create an async call to Peerset
     // to get the reputation of the peer.
-    get_peer_reputation: Pin<Box<dyn Future<Output = Result<(u16, i32), ()>> + Send>>,
+    get_peer_index: Pin<Box<dyn Future<Output = Result<u16, ()>> + Send>>,
 }
 
 /// Generated by the response builder and waiting to be processed.
@@ -331,7 +309,7 @@ impl GenericBroadcast {
             pending_responses_arrival_time: Default::default(),
             send_feedback: Default::default(),
             peerset,
-            message_request: None,
+            message_wip: None,
         })
     }
 
@@ -584,8 +562,8 @@ impl NetworkBehaviour for GenericBroadcast {
         params: &mut impl PollParameters,
     ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
         'poll_all: loop {
-            if let Some(message_request) = self.message_request.take() {
-                // Now we cannot poll `MessageRequest` until we get the reputation
+            if let Some(message_request) = self.message_wip.take() {
+                // Now we cannot pass `BroadcastMessage` until we get the peer_index
                 let BroadcastMessage {
                     peer,
                     request_id,
@@ -593,49 +571,33 @@ impl NetworkBehaviour for GenericBroadcast {
                     channel,
                     protocol,
                     resp_builder,
-                    mut get_peer_reputation,
+                    mut get_peer_index,
                 } = message_request;
 
-                let reputation = Future::poll(Pin::new(&mut get_peer_reputation), cx);
-                match reputation {
+                let peer_index = Future::poll(Pin::new(&mut get_peer_index), cx);
+                match peer_index {
                     Poll::Pending => {
                         // Save the state to poll it again next time.
-                        self.message_request = Some(BroadcastMessage {
+                        self.message_wip = Some(BroadcastMessage {
                             peer,
                             request_id,
                             request,
                             channel,
                             protocol,
                             resp_builder,
-                            get_peer_reputation,
+                            get_peer_index,
                         });
                         return Poll::Pending;
                     }
                     Poll::Ready(result) => {
-                        // Once we get the reputation we can continue processing the request.
-
-                        let (peer_index, reputation) = result.expect(
-                            "Message sender is not a part of our set; qed",
-                        );
-
-                        if reputation < BANNED_THRESHOLD {
-                            log::debug!(
-                                target: "sub-libp2p",
-                                "Cannot handle requests from a node with a low reputation {}: {}",
-                                peer,
-                                reputation,
-                            );
-                            continue 'poll_all;
-                        }
+                        let peer_index =
+                            result.expect("Message sender is not a part of our set; qed");
 
                         let (tx, rx) = oneshot::channel();
 
                         // Submit the request to the "response builder" passed by the user at
                         // initialization.
                         if let Some(mut resp_builder) = resp_builder {
-                            // If the response builder is too busy, silently drop `tx`. This
-                            // will be reported by the corresponding `RequestResponse` through
-                            // an `InboundFailure::Omission` event.
                             let _ = resp_builder.try_send(IncomingMessage {
                                 peer_index,
                                 is_broadcast: request.is_broadcast(),
@@ -648,9 +610,6 @@ impl NetworkBehaviour for GenericBroadcast {
 
                         let protocol = Cow::from(protocol);
                         self.pending_responses.push(Box::pin(async move {
-                            // The `tx` created above can be dropped if we are not capable of
-                            // processing this request, which is reflected as a
-                            // `InboundFailure::Omission` event.
                             if let Ok(response) = rx.await {
                                 Some(RequestProcessingOutcome {
                                     peer,
@@ -680,13 +639,10 @@ impl NetworkBehaviour for GenericBroadcast {
                     response:
                         OutgoingResponse {
                             result,
-                            reputation_changes,
                             sent_feedback,
                         },
                 } = match outcome {
                     Some(outcome) => outcome,
-                    // The response builder was too busy or handling the request failed. This is
-                    // later on reported as a `InboundFailure::Omission`.
                     None => continue,
                 };
 
@@ -709,15 +665,6 @@ impl NetworkBehaviour for GenericBroadcast {
                             }
                         }
                     }
-                }
-
-                if !reputation_changes.is_empty() {
-                    return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                        Event::ReputationChanges {
-                            peer,
-                            changes: reputation_changes,
-                        },
-                    ));
                 }
             }
 
@@ -799,21 +746,20 @@ impl NetworkBehaviour for GenericBroadcast {
                                 Instant::now(),
                             );
 
-                            let get_peer_reputation =
-                                self.peerset.clone().peer_reputation(peer.clone());
-                            let get_peer_reputation = Box::pin(get_peer_reputation);
+                            let get_peer_index = self.peerset.clone().peer_index(peer.clone());
+                            let get_peer_index = Box::pin(get_peer_index);
 
-                            // Save the Future-like state with params to poll `get_peer_reputation`
-                            // and to continue processing the request once we get the reputation of
+                            // Save the Future-like state with params to poll `get_peer_index`
+                            // and to continue processing the request once we get the index of
                             // the peer.
-                            self.message_request = Some(BroadcastMessage {
+                            self.message_wip = Some(BroadcastMessage {
                                 peer,
                                 request_id,
                                 request,
                                 channel,
                                 protocol: protocol.to_string(),
                                 resp_builder: resp_builder.clone(),
-                                get_peer_reputation,
+                                get_peer_index: get_peer_index,
                             });
 
                             // This `continue` makes sure that `message_request` gets polled
@@ -1008,7 +954,7 @@ impl GenericPayloadWrapper {
     fn into_bytes(self) -> Vec<u8> {
         match self {
             GenericPayloadWrapper::Direct(bytes) => bytes,
-            GenericPayloadWrapper::Broadcast(bytes) => bytes
+            GenericPayloadWrapper::Broadcast(bytes) => bytes,
         }
     }
 
@@ -1019,7 +965,7 @@ impl GenericPayloadWrapper {
     fn broadcast_marker(&self) -> u8 {
         match self {
             GenericPayloadWrapper::Direct(_) => 0,
-            GenericPayloadWrapper::Broadcast(_) => 1
+            GenericPayloadWrapper::Broadcast(_) => 1,
         }
     }
 }
@@ -1129,8 +1075,11 @@ impl RequestResponseCodec for GenericCodec {
         // Write broadcast marker
         {
             let mut buffer = unsigned_varint::encode::u8_buffer();
-            io.write_all(unsigned_varint::encode::u8(req.broadcast_marker(), &mut buffer))
-                .await?;
+            io.write_all(unsigned_varint::encode::u8(
+                req.broadcast_marker(),
+                &mut buffer,
+            ))
+            .await?;
         }
 
         let req = req.into_bytes();
