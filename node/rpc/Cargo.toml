@@ -1,0 +1,16 @@
+[package]
+name = "mpc-rpc"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1"
+async-std = "1.11.0"
+futures = { version = "0.3" }
+jsonrpc-core = "18"
+jsonrpc-derive = "18"
+jsonrpc-ws-server = "18"
+jsonrpc-core-client = { version = "18", features = ["ws"] }
+curv-kzen = "0.9"

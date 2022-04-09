@@ -21,7 +21,7 @@ mod state;
 
 use futures::{channel::mpsc, channel::oneshot, prelude::*};
 use libp2p::{Multiaddr, PeerId};
-use log::{debug};
+use log::debug;
 use std::collections::HashSet;
 use std::{
     collections::VecDeque,

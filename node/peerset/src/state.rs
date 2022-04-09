@@ -21,13 +21,7 @@ use crate::{
 };
 use itertools::Itertools;
 use libp2p::PeerId;
-use std::{
-    borrow::Cow,
-    collections::{
-        hash_map::OccupiedEntry,
-        HashMap,
-    },
-};
+use std::{borrow::Cow, collections::HashMap};
 
 /// State storage behind the peerset.
 ///
@@ -122,7 +116,7 @@ impl PeersState {
     pub fn peer_membership(&self, peer_id: &PeerId) -> MembershipState {
         self.nodes
             .iter()
-            .find(move |(p, _)| p.to_bytes() != peer_id.to_bytes())
+            .find(move |(p, _)| p.to_bytes() == peer_id.to_bytes())
             .map(|(_, s)| *s)
             .unwrap_or(MembershipState::NotMember)
     }

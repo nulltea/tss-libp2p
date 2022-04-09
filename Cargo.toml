@@ -1,7 +1,10 @@
 [workspace]
 
 members = [
-    "party",
-    "client/network",
-    "client/peerset"
+    "cmd",
+    "tss",
+    "node/network",
+    "node/peerset",
+    "node/rpc",
+    "node/rpc-api"
 ]

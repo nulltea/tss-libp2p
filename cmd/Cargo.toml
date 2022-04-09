@@ -1,0 +1,33 @@
+[package]
+name = "mpc-ecdsa"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4"
+anyhow = "1.0.56"
+gumdrop = "0.8"
+futures = { version = "0.3.2", features = ["compat"] }
+futures-util = "0.3"
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
+async-std = { version = "1.10.0", features = ["attributes", "tokio1"] }
+async-trait = "0.1"
+libp2p = "0.40.0"
+serde = {version = "1.0", features = ["derive"] }
+serde_json = "1"
+serde_ipld_dagcbor = "0.1.2"
+round-based = { version = "0.1.4" }
+multi-party-ecdsa = {git = "https://github.com/ZenGo-X/multi-party-ecdsa"}
+curv-kzen = "0.9"
+rust-crypto = "0.2"
+sha3 = "0.10"
+pretty_env_logger = "0.4.0"
+
+mpc-p2p = { path = "../node/network" }
+mpc-rpc = { path = "../node/rpc" }
+mpc-api = { path = "../node/rpc-api" }
+mpc-peerset = { path = "../node/peerset" }
+mpc-tss = { path = "../tss" }
+
+[dev-dependencies]
+round-based = { version = "0.1.4", features = ["dev"] }

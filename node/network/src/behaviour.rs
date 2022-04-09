@@ -4,8 +4,8 @@ use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::identity::Keypair;
 use libp2p::swarm::{CloseConnection, NetworkBehaviourEventProcess};
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
+use libp2p::NetworkBehaviour;
 use libp2p::PeerId;
-use libp2p::{NetworkBehaviour};
 use log::{debug, error, trace, warn};
 use mpc_peerset::Peerset;
 use std::borrow::Cow;
@@ -15,11 +15,10 @@ use std::task::{Context, Poll};
 
 const MPC_PROTOCOL_ID: &str = "/mpc/0.1.0";
 
-
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "BehaviourOut", poll_method = "poll", event_process = true)]
 pub(crate) struct Behaviour {
-    pub message_broadcast: broadcast::GenericBroadcast,
+    pub(crate) message_broadcast: broadcast::GenericBroadcast,
     identify: Identify,
 
     #[behaviour(ignore)]
@@ -97,13 +96,13 @@ impl Behaviour {
         loop {
             match futures::Stream::poll_next(Pin::new(&mut self.peerset), cx) {
                 Poll::Ready(Some(mpc_peerset::Message::Connect(addr))) => {
-                    return Poll::Ready(NetworkBehaviourAction::DialAddress{
+                    return Poll::Ready(NetworkBehaviourAction::DialAddress {
                         address: addr,
                         handler: self.new_handler(),
                     })
                 }
                 Poll::Ready(Some(mpc_peerset::Message::Drop(peer_id))) => {
-                    return Poll::Ready(NetworkBehaviourAction::CloseConnection{
+                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
                         peer_id,
                         connection: CloseConnection::All,
                     })
@@ -160,7 +159,7 @@ impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour {
             broadcast::Event::InboundMessage {
                 peer,
                 protocol,
-                result,
+                result: _,
             } => {
                 self.events
                     .push_back(BehaviourOut::InboundMessage { peer, protocol });

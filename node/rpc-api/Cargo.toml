@@ -1,0 +1,31 @@
+[package]
+name = "mpc-api"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4"
+anyhow = "1.0.56"
+futures = { version = "0.3.2" }
+futures-util = "0.3"
+tokio = { version = "1" }
+async-std = { version = "1.10.0", features = ["attributes", "tokio1"] }
+async-trait = "0.1"
+libp2p = "0.40.0"
+serde = {version = "1.0", features = ["derive"] }
+serde_json = "1"
+serde_ipld_dagcbor = "0.1.2"
+round-based = { version = "0.1.4" }
+curv-kzen = "0.9"
+multi-party-ecdsa = {git = "https://github.com/ZenGo-X/multi-party-ecdsa"}
+pretty_env_logger = "0.4.0"
+
+mpc-p2p = { path = "../network" }
+mpc-rpc = { path = "../rpc" }
+mpc-peerset = { path = "../peerset" }
+mpc-tss = { path = "../../tss" }
+
+[dev-dependencies]
+round-based = { version = "0.1.4", features = ["dev"] }

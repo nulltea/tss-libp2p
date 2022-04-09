@@ -1,6 +1,9 @@
 use crate::broadcast::IfDisconnected;
 use crate::error::Error;
-use crate::{config, behaviour::{Behaviour, BehaviourOut}, NodeKeyConfig};
+use crate::{
+    behaviour::{Behaviour, BehaviourOut},
+    config, NodeKeyConfig,
+};
 use async_std::channel::{unbounded, Receiver, Sender};
 use futures::channel::oneshot;
 use futures::select;
@@ -11,7 +14,7 @@ use libp2p::swarm::{AddressScore, SwarmEvent};
 use libp2p::tcp::TcpConfig;
 use libp2p::{mplex, noise, Multiaddr, PeerId, Swarm, Transport};
 use log::{error, info, warn};
-use mpc_peerset::{MembershipState};
+use mpc_peerset::MembershipState;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::thread::sleep;
@@ -93,11 +96,7 @@ impl NetworkWorker {
         };
 
         let behaviour = {
-            let result = Behaviour::new(
-                &keypair,
-                params.broadcast_protocols,
-                peerset,
-            );
+            let result = Behaviour::new(&keypair, params.broadcast_protocols, peerset);
 
             match result {
                 Ok(b) => b,
@@ -147,13 +146,16 @@ impl NetworkWorker {
         let mut connected_peers = HashSet::new();
 
         loop {
-            if connected_peers.len() == self.addresses.len() - 1 {
-                // minus ourselves
+            // minus ourselves
+            if connected_peers.len() < self.addresses.len() - 1 {
+                sleep(Duration::from_secs(1));
+
                 let mut just_connected = vec![];
                 for (peer_id, addr) in self.addresses.iter().filter(|(p, _)| {
                     p.to_bytes() != self.local_peer_id.to_bytes()
-                        && connected_peers.contains(p.clone())
+                        && !connected_peers.contains(p.clone())
                 }) {
+                    println!("peer_id {:?} addr {:?}", peer_id, addr);
                     match swarm_stream.get_ref().behaviour().peer_membership(peer_id) {
                         MembershipState::NotMember => {
                             warn!("all peers are expected to discovered at this point")
@@ -172,8 +174,6 @@ impl NetworkWorker {
                 for connected_peer in just_connected.into_iter() {
                     connected_peers.insert(connected_peer);
                 }
-
-                sleep(Duration::from_secs(1));
             }
 
             select! {
@@ -203,7 +203,7 @@ impl NetworkWorker {
                 rpc_message = network_stream.next() => match rpc_message {
                     // Inbound requests
                     Some(request) => {
-                        let (tx, rx) = oneshot::channel();
+                        let (tx, _rx) = oneshot::channel();
                         let behaviour = swarm_stream.get_mut().behaviour_mut();
 
                         match request {

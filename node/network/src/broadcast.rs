@@ -385,11 +385,11 @@ impl GenericBroadcast {
         targets: impl Iterator<Item = &'a PeerId>,
         protocol_name: &str,
         request: Vec<u8>,
-        pending_response: oneshot::Sender<Result<Vec<u8>, RequestFailure>>,
+        _pending_response: oneshot::Sender<Result<Vec<u8>, RequestFailure>>,
         connect: IfDisconnected,
     ) {
         for target in targets {
-            let (response_sender, response_receiver) = oneshot::channel();
+            let (response_sender, _response_receiver) = oneshot::channel();
             self._send_message(
                 target,
                 protocol_name,
@@ -632,7 +632,7 @@ impl NetworkBehaviour for GenericBroadcast {
             // Poll to see if any response is ready to be sent back.
             while let Poll::Ready(Some(outcome)) = self.pending_responses.poll_next_unpin(cx) {
                 let RequestProcessingOutcome {
-                    peer,
+                    peer: _,
                     request_id,
                     protocol: protocol_name,
                     inner_channel,
