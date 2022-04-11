@@ -38,6 +38,7 @@ enum Action {
     RemoveFromPeersSet(PeerId),
     GetPeerIndex(PeerId, oneshot::Sender<u16>),
     GetPeerAtIndex(u16, oneshot::Sender<PeerId>),
+    GetPeerIds(oneshot::Sender<Vec<PeerId>>),
 }
 
 /// Shared handle to the peer set manager (PSM). Distributed around the code.
@@ -77,6 +78,15 @@ impl PeersetHandle {
         // The channel is closed only if sender refuses sending index,
         // due to that peer not being a part of the set.
         rx.await.map_err(|_| ())
+    }
+
+    /// Returns the ids of all peers in the set.
+    pub async fn peer_ids(self) -> Result<impl ExactSizeIterator<Item = PeerId>, ()> {
+        let (tx, rx) = oneshot::channel();
+
+        let _ = self.tx.unbounded_send(Action::GetPeerIds(tx));
+
+        rx.await.map_err(|_| ()).map(|r| r.into_iter())
     }
 }
 
@@ -266,7 +276,7 @@ impl Peerset {
 
     /// Returns the number of peers that we have discovered.
     pub fn num_discovered_peers(&self) -> usize {
-        self.data.peer_ids().len()
+        self.data.nodes.len()
     }
 }
 
@@ -293,6 +303,9 @@ impl Stream for Peerset {
                 }
                 Action::GetPeerAtIndex(index, pending_result) => {
                     self.get_peer_id(index, pending_result)
+                }
+                Action::GetPeerIds(pending_result) => {
+                    pending_result.send(self.data.peer_ids().collect());
                 }
             }
         }

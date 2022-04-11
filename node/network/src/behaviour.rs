@@ -1,5 +1,7 @@
 use crate::broadcast;
-use futures::channel::oneshot;
+use crate::broadcast::ProtoContext;
+use futures::channel::mpsc;
+
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::identity::Keypair;
 use libp2p::swarm::{CloseConnection, NetworkBehaviourEventProcess};
@@ -60,26 +62,35 @@ impl Behaviour {
     pub fn send_message(
         &mut self,
         peer: &PeerId,
-        protocol: &str,
         message: Vec<u8>,
-        pending_response: oneshot::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+        protocol_id: &str,
+        ctx: ProtoContext,
+        pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
-        self.message_broadcast
-            .send_message(peer, protocol, message, pending_response, connect)
+        self.message_broadcast.send_message(
+            peer,
+            protocol_id,
+            ctx,
+            message,
+            pending_response,
+            connect,
+        )
     }
 
     /// Initiates broadcasting of a message.
     pub fn broadcast_message(
         &mut self,
-        protocol: &str,
         message: Vec<u8>,
-        pending_response: oneshot::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+        protocol_id: &str,
+        ctx: ProtoContext,
+        pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
         self.message_broadcast.broadcast_message(
             self.peerset.state().connected_peers(),
-            protocol,
+            protocol_id,
+            ctx,
             message,
             pending_response,
             connect,
@@ -99,13 +110,13 @@ impl Behaviour {
                     return Poll::Ready(NetworkBehaviourAction::DialAddress {
                         address: addr,
                         handler: self.new_handler(),
-                    })
+                    });
                 }
                 Poll::Ready(Some(mpc_peerset::Message::Drop(peer_id))) => {
                     return Poll::Ready(NetworkBehaviourAction::CloseConnection {
                         peer_id,
                         connection: CloseConnection::All,
-                    })
+                    });
                 }
                 Poll::Ready(None) => {
                     error!(target: "sub-libp2p", "Peerset receiver stream has returned None");

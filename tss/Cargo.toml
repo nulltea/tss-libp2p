@@ -20,9 +20,12 @@ round-based = { version = "0.1.4" }
 multi-party-ecdsa = {git = "https://github.com/ZenGo-X/multi-party-ecdsa"}
 curv-kzen = "0.9"
 pretty_env_logger = "0.4.0"
+twox-hash = "1.6"
+blake2 = "0.10"
 
-mpc-p2p = {path = "../node/network" }
-mpc-peerset = {path = "../node/peerset" }
+mpc-p2p = { path = "../node/network" }
+mpc-peerset = { path = "../node/peerset" }
+mpc-runtime = { path = "../node/runtime" }
 
 [dev-dependencies]
 round-based = { version = "0.1.4", features = ["dev"] }

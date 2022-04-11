@@ -1,54 +1,86 @@
-use crate::client::join_computation;
 use anyhow::anyhow;
 
-use curv::elliptic::curves::Secp256k1;
-use futures::channel::mpsc;
-use futures::future::{FutureExt, TryFutureExt};
-use futures::{pin_mut, StreamExt};
-use mpc_p2p::broadcast::IncomingMessage;
-use mpc_p2p::NetworkService;
+use crate::KEYGEN_PROTOCOL_ID;
+use curv::elliptic::curves::{Point, Secp256k1};
+
+use futures::future::TryFutureExt;
+
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::{
     Keygen, LocalKey,
 };
-use round_based::AsyncProtocol;
+
 use std::borrow::Cow;
+use std::fs::File;
+use std::hash::Hasher;
+use std::io::Write;
+use std::path::Path;
+
+use tokio::sync::oneshot;
 
 pub struct DKG {
-    protocol_id: Cow<'static, str>,
-    network_service: NetworkService,
-    incoming_receiver: mpsc::Receiver<IncomingMessage>,
+    t: u16,
+    p: String,
+    i: Option<u16>,
+    out: oneshot::Sender<anyhow::Result<Point<Secp256k1>>>,
+}
+
+impl mpc_runtime::ComputeAgent for DKG {
+    type StateMachine = Keygen;
+
+    fn construct_state(&mut self, i: u16, n: u16) -> Keygen {
+        self.i = Some(i);
+        Keygen::new(i, self.t, n).unwrap()
+    }
+
+    fn protocol_id(&self) -> Cow<'static, str> {
+        Cow::Borrowed(KEYGEN_PROTOCOL_ID)
+    }
+
+    fn done(self: Box<Self>, result: anyhow::Result<LocalKey<Secp256k1>>) {
+        match result {
+            Ok(local_key) => {
+                let pub_key = self.save_local_key(local_key);
+                self.out.send(pub_key);
+            }
+            Err(e) => {
+                self.out.send(Err(e));
+            }
+        };
+    }
 }
 
 impl DKG {
-    pub fn new(
-        protocol_id: Cow<'static, str>,
-        network_service: NetworkService,
-        incoming_receiver: mpsc::Receiver<IncomingMessage>,
-    ) -> Self {
-        Self {
-            protocol_id,
-            network_service,
-            incoming_receiver,
-        }
+    pub fn new(t: u16, p: String) -> (Self, oneshot::Receiver<anyhow::Result<Point<Secp256k1>>>) {
+        let (tx, rx) = oneshot::channel();
+        let agent = Self {
+            t,
+            p,
+            i: None,
+            out: tx,
+        };
+
+        (agent, rx)
     }
 
-    pub async fn compute(self, t: u16, n: u16) -> anyhow::Result<LocalKey<Secp256k1>> {
-        let (index, incoming, outgoing) = join_computation(
-            self.protocol_id.clone(),
-            self.network_service.clone(),
-            self.incoming_receiver,
-        )
-        .await;
+    fn save_local_key(&self, local_key: LocalKey<Secp256k1>) -> anyhow::Result<Point<Secp256k1>> {
+        let _i = self
+            .i
+            .expect("party index expected to be known by this point");
 
-        let incoming = incoming.fuse();
-        pin_mut!(incoming, outgoing);
+        let path_format = self.p.replace("{}", self.i.unwrap().to_string().as_str());
+        let path = Path::new(path_format.as_str());
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
 
-        let keygen = Keygen::new(index + 1, t, n)?;
-        let output = AsyncProtocol::new(keygen, incoming, outgoing)
-            .run()
-            .await
-            .map_err(|e| anyhow!("protocol execution terminated with error: {e}"))?;
+        let mut file = File::create(path)
+            .map_err(|e| anyhow!("writing share to disk terminated with error: {e}"))?;
 
-        Ok(output)
+        let share_bytes = serde_json::to_vec(&local_key)
+            .map_err(|e| anyhow!("share serialization terminated with error: {e}"))?;
+
+        file.write(&share_bytes)
+            .map_err(|e| anyhow!("share serialization terminated with error: {e}"))?;
+
+        Ok(local_key.y_sum_s)
     }
 }

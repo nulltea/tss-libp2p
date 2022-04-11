@@ -1,4 +1,6 @@
-pub mod client;
+#![feature(inherent_associated_types)]
+extern crate core;
+
 mod config;
 mod keygen;
 

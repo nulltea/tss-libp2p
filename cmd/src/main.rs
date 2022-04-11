@@ -7,19 +7,17 @@ use anyhow::anyhow;
 use async_std::task;
 use futures::future::{FutureExt, TryFutureExt};
 use futures::StreamExt;
-
 use gumdrop::Options;
 use libp2p::PeerId;
 use log::error;
 use mpc_api::RpcApi;
 use mpc_p2p::{broadcast, NetworkConfig, NetworkWorker, NodeKeyConfig, Params, Secret};
 use mpc_rpc::server::JsonRPCServer;
-use mpc_tss::{generate_config, Config, DKG, KEYGEN_PROTOCOL_ID};
-
+use mpc_runtime::RuntimeDaemon;
+use mpc_tss::{generate_config, Config, KEYGEN_PROTOCOL_ID};
 use sha3::Digest;
 use std::borrow::Cow;
 use std::error::Error;
-
 use std::process;
 
 #[tokio::main]
@@ -74,16 +72,21 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         )?
     };
 
-    let p2p_task = task::spawn(async {
+    let net_task = task::spawn(async {
         net_worker.run().await;
     });
 
+    let (rt_worker, rt_service) = RuntimeDaemon::new(
+        net_service,
+        vec![((Cow::Borrowed(KEYGEN_PROTOCOL_ID), keygen_receiver))].into_iter(),
+    );
+
+    let rt_task = task::spawn(async {
+        rt_worker.run().await;
+    });
+
     let rpc_server = {
-        let handler = RpcApi::new(DKG::new(
-            Cow::Borrowed(KEYGEN_PROTOCOL_ID),
-            net_service.clone(),
-            keygen_receiver,
-        ));
+        let handler = RpcApi::new(rt_service);
         JsonRPCServer::new(
             mpc_rpc::server::Config {
                 host_address: local_party.rpc_addr,
@@ -95,7 +98,8 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
 
     rpc_server.run().await;
 
-    let _ = p2p_task.cancel().await;
+    let _ = rt_task.cancel().await;
+    let _ = net_task.cancel().await;
 
     println!("bye");
 
@@ -105,11 +109,7 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
 async fn keygen(args: KeygenArgs) -> anyhow::Result<()> {
     let mut futures = vec![];
     for addr in args.addresses {
-        futures.push(
-            mpc_rpc::new_client(addr)
-                .await?
-                .keygen(args.threshold, args.number_of_parties),
-        );
+        futures.push(mpc_rpc::new_client(addr).await?.keygen(args.threshold));
     }
 
     let mut pub_key_hash = None;
@@ -128,7 +128,9 @@ async fn keygen(args: KeygenArgs) -> anyhow::Result<()> {
                     pub_key_hash = Some(sha3::Keccak256::digest(pub_key.to_bytes(true).to_vec()))
                 }
             }
-            Err(e) => error!("received error: {}", e),
+            Err(e) => {
+                return Err(anyhow!("received error: {}", e));
+            }
         }
     }
 

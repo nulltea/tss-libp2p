@@ -1,11 +1,11 @@
-use crate::broadcast::IfDisconnected;
+use crate::broadcast::{IfDisconnected, ProtoContext};
 use crate::error::Error;
 use crate::{
     behaviour::{Behaviour, BehaviourOut},
-    config, NodeKeyConfig,
+    broadcast, config, NodeKeyConfig,
 };
 use async_std::channel::{unbounded, Receiver, Sender};
-use futures::channel::oneshot;
+use futures::channel::mpsc;
 use futures::select;
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
@@ -30,8 +30,25 @@ pub enum NetworkEvent {
 /// Messages into the service to handle.
 #[derive(Debug)]
 pub enum NetworkMessage {
-    Broadcast(Cow<'static, str>, Vec<u8>),
-    SendDirect(Cow<'static, str>, u16, Vec<u8>),
+    CrossRoundExchange {
+        session_id: u64,
+        protocol_id: Cow<'static, str>,
+        round_index: u16,
+        message: MessageRouting,
+    },
+}
+
+#[derive(Debug)]
+pub enum MessageRouting {
+    Broadcast(
+        Vec<u8>,
+        mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+    ),
+    SendDirect(
+        u16,
+        Vec<u8>,
+        mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+    ),
 }
 
 /// The Libp2pService listens to events from the Libp2p swarm.
@@ -101,7 +118,7 @@ impl NetworkWorker {
             match result {
                 Ok(b) => b,
                 Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
-                    return Err(Error::DuplicateBroadcastProtocol { protocol: proto })
+                    return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
                 }
             }
         };
@@ -195,6 +212,7 @@ impl NetworkWorker {
                                 .get_mut()
                                 .behaviour_mut()
                                 .mark_peer_as_disconnected(peer_id);
+                            connected_peers.remove(&peer_id);
                         }
                         _ => continue
                     }
@@ -203,39 +221,53 @@ impl NetworkWorker {
                 rpc_message = network_stream.next() => match rpc_message {
                     // Inbound requests
                     Some(request) => {
-                        let (tx, _rx) = oneshot::channel();
                         let behaviour = swarm_stream.get_mut().behaviour_mut();
 
                         match request {
-                            NetworkMessage::Broadcast(protocol, message) => {
-                                behaviour.broadcast_message(
-                                    &protocol,
-                                    message,
-                                    tx,
-                                    IfDisconnected::ImmediateError
-                                )
-                            }
-                            NetworkMessage::SendDirect(protocol, receiver_index, message) => {
-                                if let Some(receiver_peer) = behaviour.peer_at_index(receiver_index as usize)
-                                {
-                                    error!("sending direct message to index {} peer {:?}", receiver_index, receiver_peer);
-                                    behaviour.send_message(
-                                        &receiver_peer,
-                                        &protocol,
-                                        message,
-                                        tx,
-                                        IfDisconnected::ImmediateError
-                                    )
-                                } else {
-                                    error!("receiver at index ({receiver_index}) does not exists in the set")
+                            NetworkMessage::CrossRoundExchange {
+                                session_id,
+                                protocol_id,
+                                round_index,
+                                message
+                            } => {
+                                let ctx = ProtoContext {
+                                    session_id,
+                                    round_index,
+                                };
+
+                                match message {
+                                    MessageRouting::Broadcast(payload, response_sender) => {
+                                        behaviour.broadcast_message(
+                                            payload,
+                                            &protocol_id,
+                                            ctx,
+                                            response_sender,
+                                            IfDisconnected::ImmediateError,
+                                        )
+                                    }
+                                    MessageRouting::SendDirect(receiver_index, payload, response_sender) => {
+                                        if let Some(receiver_peer) = behaviour.peer_at_index(receiver_index as usize)
+                                        {
+                                            behaviour.send_message(
+                                                &receiver_peer,
+                                                payload,
+                                                &protocol_id,
+                                                ctx,
+                                                response_sender,
+                                                IfDisconnected::ImmediateError,
+                                            )
+                                        } else {
+                                            error!("receiver at index ({receiver_index}) does not exists in the set")
+                                        }
+                                    }
                                 }
                             }
-                        }
 
-                        // match rx.await {
-                        //     Ok(_v) => continue,
-                        //     Err(e) => error!("failed to wait for response {}", e),
-                        // }
+                            // match rx.await {
+                            //     Ok(_v) => continue,
+                            //     Err(e) => error!("failed to wait for response {}", e),
+                            // }
+                        }
                     }
                     None => { break; }
                 }
@@ -245,22 +277,40 @@ impl NetworkWorker {
 }
 
 impl NetworkService {
-    pub async fn broadcast_message(&self, protocol: &str, payload: Vec<u8>) {
+    pub async fn broadcast_message(
+        &self,
+        session_id: u64,
+        protocol_id: String,
+        round_index: u16,
+        payload: Vec<u8>,
+        response_sender: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+    ) {
         self.to_worker
-            .send(NetworkMessage::Broadcast(
-                Cow::Owned(protocol.to_string()),
-                payload,
-            ))
+            .send(NetworkMessage::CrossRoundExchange {
+                session_id,
+                protocol_id: Cow::Owned(protocol_id),
+                round_index,
+                message: MessageRouting::Broadcast(payload, response_sender),
+            })
             .await;
     }
 
-    pub async fn send_message(&self, protocol: &str, peer_index: u16, payload: Vec<u8>) {
+    pub async fn send_message(
+        &self,
+        session_id: u64,
+        protocol_id: String,
+        round_index: u16,
+        peer_index: u16,
+        payload: Vec<u8>,
+        response_sender: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+    ) {
         self.to_worker
-            .send(NetworkMessage::SendDirect(
-                Cow::Owned(protocol.to_string()),
-                peer_index,
-                payload,
-            ))
+            .send(NetworkMessage::CrossRoundExchange {
+                session_id,
+                protocol_id: Cow::Owned(protocol_id),
+                round_index,
+                message: MessageRouting::SendDirect(peer_index, payload, response_sender),
+            })
             .await;
     }
 
@@ -274,5 +324,13 @@ impl NetworkService {
             .peer_index(self.local_peer_id())
             .await
             .expect("failed determining local peer index")
+    }
+
+    pub async fn get_peers(&self) -> impl ExactSizeIterator<Item = PeerId> {
+        self.peerset
+            .clone()
+            .peer_ids()
+            .await
+            .expect("failed getting peers")
     }
 }

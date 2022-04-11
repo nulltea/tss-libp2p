@@ -5,6 +5,7 @@ members = [
     "tss",
     "node/network",
     "node/peerset",
+    "node/runtime",
     "node/rpc",
-    "node/rpc-api"
+    "node/rpc-api",
 ]
