@@ -104,7 +104,7 @@ impl<'a> NotConnectedPeer<'a> {
 
     /// Tries to accept the peer as an incoming connection.
     pub fn try_accept_peer(self) -> Result<ConnectedPeer<'a>, Self> {
-        if self.state.set.num_peers >= self.state.set.max_peers {
+        if self.state.set.num_peers >= self.state.set.target_size {
             return Err(self);
         }
 

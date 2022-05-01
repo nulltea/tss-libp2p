@@ -47,9 +47,8 @@ impl PeersState {
             nodes: HashMap::new(),
             set: SetInfo {
                 num_peers: 0,
-                max_peers: config.peers_limit,
+                target_size: config.target_size,
                 initial_nodes: config.initial_nodes,
-                static_set: config.static_set,
             },
         }
     }

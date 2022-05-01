@@ -1,9 +1,13 @@
 use crate::broadcast;
 use crate::broadcast::ProtoContext;
+use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
 use futures::channel::mpsc;
 
+use crate::coordination::CoordinationBehaviour;
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::identity::Keypair;
+use libp2p::kad::QueryId;
+use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess};
 use libp2p::swarm::{CloseConnection, NetworkBehaviourEventProcess};
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
 use libp2p::NetworkBehaviour;
@@ -20,8 +24,11 @@ const MPC_PROTOCOL_ID: &str = "/mpc/0.1.0";
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "BehaviourOut", poll_method = "poll", event_process = true)]
 pub(crate) struct Behaviour {
-    pub(crate) message_broadcast: broadcast::GenericBroadcast,
+    ping: Ping,
     identify: Identify,
+    discovery: DiscoveryBehaviour,
+    coordination: CoordinationBehaviour,
+    broadcast: broadcast::GenericBroadcast,
 
     #[behaviour(ignore)]
     events: VecDeque<BehaviourOut>,
@@ -41,18 +48,24 @@ pub(crate) enum BehaviourOut {
 impl Behaviour {
     pub fn new(
         local_key: &Keypair,
-        broadcast_protocols: Vec<broadcast::ProtocolConfig>,
+        params: &crate::Params,
         peerset: Peerset,
     ) -> Result<Behaviour, broadcast::RegisterError> {
+        let (coordination, peerset_handle) =
+            CoordinationBehaviour::new(params.network_config.clone());
+
         Ok(Behaviour {
-            message_broadcast: broadcast::GenericBroadcast::new(
-                broadcast_protocols.into_iter(),
+            broadcast: broadcast::GenericBroadcast::new(
+                params.broadcast_protocols.into_iter(),
                 peerset.get_handle(),
             )?,
+            discovery: DiscoveryBehaviour::new(local_key.public(), params.network_config.clone()),
+            coordination,
             identify: Identify::new(IdentifyConfig::new(
                 MPC_PROTOCOL_ID.into(),
                 local_key.public(),
             )),
+            ping: Ping::default(),
             events: VecDeque::new(),
             peerset,
         })
@@ -68,14 +81,8 @@ impl Behaviour {
         pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
-        self.message_broadcast.send_message(
-            peer,
-            protocol_id,
-            ctx,
-            message,
-            pending_response,
-            connect,
-        )
+        self.broadcast
+            .send_message(peer, protocol_id, ctx, message, pending_response, connect)
     }
 
     /// Initiates broadcasting of a message.
@@ -87,7 +94,7 @@ impl Behaviour {
         pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
-        self.message_broadcast.broadcast_message(
+        self.broadcast.broadcast_message(
             self.peerset.state().connected_peers(),
             protocol_id,
             ctx,
@@ -104,28 +111,6 @@ impl Behaviour {
         _: &mut impl PollParameters,
     ) -> Poll<NetworkBehaviourAction<BehaviourOut, <Self as NetworkBehaviour>::ProtocolsHandler>>
     {
-        loop {
-            match futures::Stream::poll_next(Pin::new(&mut self.peerset), cx) {
-                Poll::Ready(Some(mpc_peerset::Message::Connect(addr))) => {
-                    return Poll::Ready(NetworkBehaviourAction::DialAddress {
-                        address: addr,
-                        handler: self.new_handler(),
-                    });
-                }
-                Poll::Ready(Some(mpc_peerset::Message::Drop(peer_id))) => {
-                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
-                        peer_id,
-                        connection: CloseConnection::All,
-                    });
-                }
-                Poll::Ready(None) => {
-                    error!(target: "sub-libp2p", "Peerset receiver stream has returned None");
-                    break;
-                }
-                Poll::Pending => break,
-            }
-        }
-
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
         }
@@ -133,41 +118,20 @@ impl Behaviour {
         Poll::Pending
     }
 
-    pub fn mark_peer_as_connected(&mut self, peer_id: PeerId) {
-        let peer = self.peerset.state_mut().peer(&peer_id);
-        if let Some(not_connected) = peer.into_not_connected() {
-            if not_connected.try_accept_peer().is_ok() {
-                debug!("Peer {} marked as connected", peer_id.to_base58());
-            } else {
-                warn!(
-                    "Peer {} was already marked as connected",
-                    peer_id.to_base58()
-                );
-            }
-        }
-    }
-
-    pub fn mark_peer_as_disconnected(&mut self, peer_id: PeerId) {
-        let peer = self.peerset.state_mut().peer(&peer_id);
-        if let Some(connected) = peer.into_connected() {
-            connected.disconnect();
-            debug!("Peer {} marked as disconnected", peer_id.to_base58())
-        }
-    }
-
-    pub fn peer_membership(&self, peer_id: &PeerId) -> mpc_peerset::MembershipState {
-        self.peerset.state().peer_membership(peer_id)
-    }
-
     pub fn peer_at_index(&self, index: usize) -> Option<PeerId> {
         self.peerset.state().at_index(index)
     }
+
+    /// Bootstrap Kademlia network
+    pub fn bootstrap(&mut self) -> Result<QueryId, String> {
+        self.discovery.bootstrap()
+    }
 }
 
-impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour {
-    fn inject_event(&mut self, event: broadcast::Event) {
+impl NetworkBehaviourEventProcess<broadcast::BroadcastOut> for Behaviour {
+    fn inject_event(&mut self, event: broadcast::BroadcastOut) {
         match event {
-            broadcast::Event::InboundMessage {
+            broadcast::BroadcastOut::InboundMessage {
                 peer,
                 protocol,
                 result: _,
@@ -175,7 +139,7 @@ impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour {
                 self.events
                     .push_back(BehaviourOut::InboundMessage { peer, protocol });
             }
-            broadcast::Event::BroadcastFinished {
+            broadcast::BroadcastOut::BroadcastFinished {
                 peer,
                 protocol,
                 duration,
@@ -188,6 +152,17 @@ impl NetworkBehaviourEventProcess<broadcast::Event> for Behaviour {
                     peer,
                     duration
                 );
+            }
+        }
+    }
+}
+
+impl NetworkBehaviourEventProcess<DiscoveryOut> for Behaviour {
+    fn inject_event(&mut self, event: DiscoveryOut) {
+        match event {
+            DiscoveryOut::Connected(peer_id) => self.peerset.add_to_peers_set(peer_id),
+            DiscoveryOut::Disconnected(peer) => {
+                self.peerset.get_handle().remove_from_peers_set(peer_id);
             }
         }
     }
@@ -207,6 +182,32 @@ impl NetworkBehaviourEventProcess<IdentifyEvent> for Behaviour {
             IdentifyEvent::Sent { .. } => (),
             IdentifyEvent::Pushed { .. } => (),
             IdentifyEvent::Error { .. } => (),
+        }
+    }
+}
+
+impl NetworkBehaviourEventProcess<PingEvent> for Behaviour {
+    fn inject_event(&mut self, event: PingEvent) {
+        match event.result {
+            Ok(PingSuccess::Ping { rtt }) => {
+                trace!(
+                    "PingSuccess::Ping rtt to {} is {} ms",
+                    event.peer.to_base58(),
+                    rtt.as_millis()
+                );
+            }
+            Ok(PingSuccess::Pong) => {
+                trace!("PingSuccess::Pong from {}", event.peer.to_base58());
+            }
+            Err(PingFailure::Timeout) => {
+                debug!("PingFailure::Timeout {}", event.peer.to_base58());
+            }
+            Err(PingFailure::Other { error }) => {
+                debug!("PingFailure::Other {}: {}", event.peer.to_base58(), error);
+            }
+            Err(PingFailure::Unsupported) => {
+                debug!("PingFailure::Unsupported {}", event.peer.to_base58());
+            }
         }
     }
 }

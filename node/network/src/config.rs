@@ -1,4 +1,5 @@
 use crate::broadcast;
+use crate::discovery::DiscoveryConfig;
 use anyhow::anyhow;
 use libp2p::identity::{ed25519, Keypair};
 use libp2p::{multiaddr, Multiaddr, PeerId};
@@ -18,31 +19,14 @@ pub struct Params {
 
 #[derive(Clone)]
 pub struct NetworkConfig {
-    pub node_name: String,
     /// Multi-addresses to listen for incoming connections.
-    pub listen_addresses: Vec<Multiaddr>,
-    /// Multi-addresses to advertise. Detected automatically if empty.
-    pub public_addresses: Vec<Multiaddr>,
+    pub listen_address: Multiaddr,
     /// Configuration for the default set of nodes that participate in computation.
-    pub initial_peers: Vec<MultiaddrWithPeerId>,
-}
-
-impl NetworkConfig {
-    pub fn new(multiaddr: Multiaddr, peers: impl Iterator<Item = MultiaddrWithPeerId>) -> Self {
-        Self {
-            node_name: "node".to_string(),
-            listen_addresses: vec![multiaddr.clone()],
-            public_addresses: vec![multiaddr],
-            initial_peers: peers.collect(),
-        }
-    }
-
-    pub fn into_peers_hashmap(self) -> HashMap<PeerId, Multiaddr> {
-        self.initial_peers
-            .into_iter()
-            .map(|ip| (ip.peer_id, ip.multiaddr))
-            .collect()
-    }
+    pub bootstrap_peers: Vec<MultiaddrWithPeerId>,
+    /// Mdns discovery enabled.
+    pub mdns: bool,
+    /// Kademlia discovery enabled.
+    pub kademlia: bool,
 }
 
 /// The configuration of a node's secret key, describing the type of key

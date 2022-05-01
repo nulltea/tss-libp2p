@@ -1,4 +1,4 @@
-use crate::broadcast::{IfDisconnected, ProtoContext};
+use crate::broadcast::{IfDisconnected, ProtoContext, ProtocolConfig};
 use crate::error::Error;
 use crate::{
     behaviour::{Behaviour, BehaviourOut},
@@ -9,7 +9,9 @@ use futures::channel::mpsc;
 use futures::select;
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
+use libp2p::identify::{Identify, IdentifyConfig};
 use libp2p::noise::NoiseConfig;
+use libp2p::swarm::SwarmEvent::Behaviour;
 use libp2p::swarm::{AddressScore, SwarmEvent};
 use libp2p::tcp::TcpConfig;
 use libp2p::{mplex, noise, Multiaddr, PeerId, Swarm, Transport};
@@ -54,7 +56,6 @@ pub enum MessageRouting {
 /// The Libp2pService listens to events from the Libp2p swarm.
 pub struct NetworkWorker {
     swarm: Swarm<Behaviour>,
-    addresses: HashMap<PeerId, Multiaddr>,
     from_service: Receiver<NetworkMessage>,
     local_peer_id: PeerId,
 }
@@ -82,15 +83,10 @@ impl NetworkWorker {
             local_peer_id.to_base58(),
         );
 
-        let addresses = {
-            let net_nfg = params.network_config.clone();
-            net_nfg.into_peers_hashmap()
-        };
-
         let (peerset, peerset_handle) = {
             let peers = params
                 .network_config
-                .initial_peers
+                .bootstrap_peers
                 .into_iter()
                 .map(|p| p.peer_id);
 
@@ -113,29 +109,28 @@ impl NetworkWorker {
         };
 
         let behaviour = {
-            let result = Behaviour::new(&keypair, params.broadcast_protocols, peerset);
+            let mut broadcast_protocols = params.broadcast_protocols;
+            broadcast_protocols.push(ProtocolConfig {
+                name: Default::default(),
+                max_request_size: 0,
+                max_response_size: 0,
+                request_timeout: Default::default(),
+                inbound_queue: None,
+            });
 
-            match result {
+            match Behaviour::new(&keypair, &params, peerset) {
                 Ok(b) => b,
                 Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
                     return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
                 }
-            }
+            };
         };
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
         // Listen on the addresses.
-        for addr in &params.network_config.listen_addresses {
-            if let Err(err) = swarm.listen_on(addr.clone()) {
-                warn!(target: "sub-libp2p", "Can't listen on {} because: {:?}", addr, err)
-            }
-            println!("listening on {}", addr.to_string())
-        }
-
-        // Add external addresses.
-        for addr in &params.network_config.public_addresses {
-            swarm.add_external_address(addr.clone(), AddressScore::Infinite);
+        if let Err(err) = swarm.listen_on(params.network_config.listen_address) {
+            warn!(target: "sub-libp2p", "Can't listen on {} because: {:?}", addr, err)
         }
 
         let (network_sender_in, network_receiver_in) = unbounded();
@@ -143,7 +138,6 @@ impl NetworkWorker {
         let worker = NetworkWorker {
             local_peer_id,
             swarm,
-            addresses,
             from_service: network_receiver_in,
         };
 
@@ -160,38 +154,38 @@ impl NetworkWorker {
     pub async fn run(self) {
         let mut swarm_stream = self.swarm.fuse();
         let mut network_stream = self.from_service.fuse();
-        let mut connected_peers = HashSet::new();
+        //let mut connected_peers = HashSet::new();
 
-        loop {
-            // minus ourselves
-            if connected_peers.len() < self.addresses.len() - 1 {
-                sleep(Duration::from_secs(1));
-
-                let mut just_connected = vec![];
-                for (peer_id, addr) in self.addresses.iter().filter(|(p, _)| {
-                    p.to_bytes() != self.local_peer_id.to_bytes()
-                        && !connected_peers.contains(p.clone())
-                }) {
-                    println!("peer_id {:?} addr {:?}", peer_id, addr);
-                    match swarm_stream.get_ref().behaviour().peer_membership(peer_id) {
-                        MembershipState::NotMember => {
-                            warn!("all peers are expected to discovered at this point")
-                        }
-                        MembershipState::Connected => {
-                            just_connected.push(peer_id.clone());
-                        }
-                        MembershipState::NotConnected { .. } => {
-                            if swarm_stream.get_mut().dial_addr(addr.clone()).is_err() {
-                                error!("Failed dealing peer {}", peer_id.to_base58());
-                            }
-                        }
-                    }
-                }
-
-                for connected_peer in just_connected.into_iter() {
-                    connected_peers.insert(connected_peer);
-                }
-            }
+        // loop {
+        //     // minus ourselves
+        //     if connected_peers.len() < self.addresses.len() - 1 {
+        //         sleep(Duration::from_secs(1));
+        //
+        //         let mut just_connected = vec![];
+        //         for (peer_id, addr) in self.addresses.iter().filter(|(p, _)| {
+        //             p.to_bytes() != self.local_peer_id.to_bytes()
+        //                 && !connected_peers.contains(p.clone())
+        //         }) {
+        //             println!("peer_id {:?} addr {:?}", peer_id, addr);
+        //             match swarm_stream.get_ref().behaviour().peer_membership(peer_id) {
+        //                 MembershipState::NotMember => {
+        //                     warn!("all peers are expected to discovered at this point")
+        //                 }
+        //                 MembershipState::Connected => {
+        //                     just_connected.push(peer_id.clone());
+        //                 }
+        //                 MembershipState::NotConnected { .. } => {
+        //                     if swarm_stream.get_mut().dial_addr(addr.clone()).is_err() {
+        //                         error!("Failed dealing peer {}", peer_id.to_base58());
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //
+        //         for connected_peer in just_connected.into_iter() {
+        //             connected_peers.insert(connected_peer);
+        //         }
+        //     }
 
             select! {
                 swarm_event = swarm_stream.next() => match swarm_event {
@@ -212,7 +206,6 @@ impl NetworkWorker {
                                 .get_mut()
                                 .behaviour_mut()
                                 .mark_peer_as_disconnected(peer_id);
-                            connected_peers.remove(&peer_id);
                         }
                         _ => continue
                     }

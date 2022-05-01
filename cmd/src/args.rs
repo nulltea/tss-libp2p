@@ -25,6 +25,12 @@ pub struct DeployArgs {
 
     #[options(help = "path to participation private_key")]
     pub private_key: String,
+
+    #[options(help = "peer discovery with Kad-DHT")]
+    pub kademlia: bool,
+
+    #[options(help = "peer discovery with mdns")]
+    pub mdns: bool,
 }
 
 #[derive(Debug, Options, Clone)]

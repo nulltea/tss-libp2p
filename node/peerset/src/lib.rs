@@ -116,35 +116,21 @@ impl From<u64> for IncomingIndex {
 pub struct PeersetConfig {
     /// Maximum number of ingoing links to peers.
     /// Zero value means unlimited.
-    pub peers_limit: u32,
+    pub target_size: u32,
 
     /// List of bootstrap nodes to initialize the set with.
     ///
     /// > **Note**: Keep in mind that the networking has to know an address for these nodes,
     /// >           otherwise it will not be able to connect to them.
-    pub boot_nodes: Option<Vec<PeerId>>,
-
-    /// Lists of nodes we should always be connected to.
-    ///
-    /// > **Note**: Keep in mind that the networking has to know an address for these nodes,
-    /// >			otherwise it will not be able to connect to them.
-    pub initial_nodes: HashSet<PeerId>,
-
-    /// If true, we only accept nodes in [`SetConfig::initial_nodes`].
-    pub static_set: bool,
+    pub boot_nodes: Vec<PeerId>,
 }
 
 impl PeersetConfig {
-    pub fn new_static(peers: impl Iterator<Item = PeerId>) -> Self {
-        let mut set = Self {
-            static_set: true,
-            initial_nodes: peers.collect(),
-            peers_limit: 0,
-            boot_nodes: None,
-        };
-
-        set.peers_limit = set.initial_nodes.len() as u32;
-        set
+    pub fn new(peers: impl Iterator<Item = PeerId>, target_size: u32) -> Self {
+        Self {
+            target_size,
+            boot_nodes: peers.collect(),
+        }
     }
 }
 
@@ -155,14 +141,11 @@ pub(crate) struct SetInfo {
     pub num_peers: u32,
 
     /// Maximum allowed number of slot-occupying nodes for which the `MembershipState` is `In`.
-    pub max_peers: u32,
+    pub target_size: u32,
 
     /// List of node identities (discovered or not) that was introduced into the set
     /// via static configuration [`SetConfig::initial_nodes`].
     pub initial_nodes: HashSet<PeerId>,
-
-    // States that peerset is locked and won't accept any more peers and changes.
-    pub static_set: bool,
 }
 
 /// Side of the peer set manager owned by the network. In other words, the "receiving" side.

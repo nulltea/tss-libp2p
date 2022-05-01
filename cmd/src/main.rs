@@ -59,7 +59,13 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         let _local_party_addr = local_party.network_peer.multiaddr.clone();
         let network_peers = config.parties.into_iter().map(|p| p.network_peer);
         let network_config =
-            NetworkConfig::new(local_party.clone().network_peer.multiaddr, network_peers);
+            NetworkConfig{
+                listen_address: local_party.clone().network_peer.,
+                public_addresses: vec![],
+                bootstrap_peers: vec![],
+                mdns: args.mdns,
+                kademlia: args.kademlia
+            };
 
         let broadcast_protocols = vec![keygen_config];
 
