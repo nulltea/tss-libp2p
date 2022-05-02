@@ -48,7 +48,7 @@ impl PeersState {
             set: SetInfo {
                 num_peers: 0,
                 target_size: config.target_size,
-                initial_nodes: config.initial_nodes,
+                initial_nodes: config.boot_nodes.into_iter().collect(),
             },
         }
     }

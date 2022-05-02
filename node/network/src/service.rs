@@ -11,7 +11,6 @@ use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
 use libp2p::identify::{Identify, IdentifyConfig};
 use libp2p::noise::NoiseConfig;
-use libp2p::swarm::SwarmEvent::Behaviour;
 use libp2p::swarm::{AddressScore, SwarmEvent};
 use libp2p::tcp::TcpConfig;
 use libp2p::{mplex, noise, Multiaddr, PeerId, Swarm, Transport};
@@ -130,7 +129,7 @@ impl NetworkWorker {
 
         // Listen on the addresses.
         if let Err(err) = swarm.listen_on(params.network_config.listen_address) {
-            warn!(target: "sub-libp2p", "Can't listen on {} because: {:?}", addr, err)
+            warn!(target: "sub-libp2p", "Can't listen on {} because: {:?}", params.network_config.listen_address, err)
         }
 
         let (network_sender_in, network_receiver_in) = unbounded();
@@ -151,42 +150,16 @@ impl NetworkWorker {
     }
 
     /// Starts the libp2p service networking stack.
-    pub async fn run(self) {
+    pub async fn run(mut self) {
+        // Bootstrap with Kademlia
+        if let Err(e) = self.swarm.behaviour_mut().bootstrap() {
+            warn!("Failed to bootstrap with Kademlia: {}", e);
+        }
+
         let mut swarm_stream = self.swarm.fuse();
         let mut network_stream = self.from_service.fuse();
-        //let mut connected_peers = HashSet::new();
 
-        // loop {
-        //     // minus ourselves
-        //     if connected_peers.len() < self.addresses.len() - 1 {
-        //         sleep(Duration::from_secs(1));
-        //
-        //         let mut just_connected = vec![];
-        //         for (peer_id, addr) in self.addresses.iter().filter(|(p, _)| {
-        //             p.to_bytes() != self.local_peer_id.to_bytes()
-        //                 && !connected_peers.contains(p.clone())
-        //         }) {
-        //             println!("peer_id {:?} addr {:?}", peer_id, addr);
-        //             match swarm_stream.get_ref().behaviour().peer_membership(peer_id) {
-        //                 MembershipState::NotMember => {
-        //                     warn!("all peers are expected to discovered at this point")
-        //                 }
-        //                 MembershipState::Connected => {
-        //                     just_connected.push(peer_id.clone());
-        //                 }
-        //                 MembershipState::NotConnected { .. } => {
-        //                     if swarm_stream.get_mut().dial_addr(addr.clone()).is_err() {
-        //                         error!("Failed dealing peer {}", peer_id.to_base58());
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //
-        //         for connected_peer in just_connected.into_iter() {
-        //             connected_peers.insert(connected_peer);
-        //         }
-        //     }
-
+        loop {
             select! {
                 swarm_event = swarm_stream.next() => match swarm_event {
                     // Outbound events
@@ -195,18 +168,8 @@ impl NetworkWorker {
                             info!("Inbound message from {:?} related to {:?} protocol", peer, protocol);
                         },
                         SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {:?}", address),
-                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                            swarm_stream
-                                .get_mut()
-                                .behaviour_mut()
-                                .mark_peer_as_connected(peer_id);
-                        },
-                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                            swarm_stream
-                                .get_mut()
-                                .behaviour_mut()
-                                .mark_peer_as_disconnected(peer_id);
-                        }
+                        SwarmEvent::ConnectionEstablished { peer_id, .. } => { },
+                        SwarmEvent::ConnectionClosed { peer_id, .. } => { }
                         _ => continue
                     }
                     None => { break; }

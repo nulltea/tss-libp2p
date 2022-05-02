@@ -186,18 +186,8 @@ impl Peerset {
             }
         };
 
-        for peer_id in config.initial_nodes {
+        for peer_id in config.boot_nodes {
             peerset.add_to_peers_set(peer_id);
-        }
-
-        if let Some(boot_nodes) = config.boot_nodes {
-            for peer_id in boot_nodes {
-                if let Peer::Unknown(entry) = peerset.data.peer(&peer_id) {
-                    entry.discover();
-                } else {
-                    debug!(target: "peerset", "Duplicate bootstrap node in config: {:?}", peer_id);
-                }
-            }
         }
 
         (peerset, handle)

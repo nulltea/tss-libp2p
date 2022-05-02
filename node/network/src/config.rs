@@ -1,5 +1,4 @@
 use crate::broadcast;
-use crate::discovery::DiscoveryConfig;
 use anyhow::anyhow;
 use libp2p::identity::{ed25519, Keypair};
 use libp2p::{multiaddr, Multiaddr, PeerId};

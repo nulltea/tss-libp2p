@@ -37,6 +37,7 @@ use libp2p::{
     },
 };
 
+use std::ops::Add;
 use std::{
     borrow::Cow,
     collections::{hash_map::Entry, HashMap},
@@ -289,6 +290,7 @@ impl GenericBroadcast {
             let mut cfg = RequestResponseConfig::default();
             cfg.set_connection_keep_alive(Duration::from_secs(20));
             cfg.set_request_timeout(protocol.request_timeout);
+            cfg.set_connection_keep_alive(protocol.request_timeout.add(Duration::from_secs(10)));
 
             let protocol_support = if protocol.inbound_queue.is_some() {
                 ProtocolSupport::Full

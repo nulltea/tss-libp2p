@@ -1,7 +1,3 @@
-// Copyright 2019-2022 ChainSafe Systems
-// SPDX-License-Identifier: Apache-2.0, MIT
-
-use async_std::stream::{self, Interval};
 use async_std::task;
 use futures::prelude::*;
 use libp2p::core::network::NetworkConfig;
@@ -51,10 +47,6 @@ pub struct DiscoveryBehaviour {
     kademlia: Toggle<Kademlia<MemoryStore>>,
     /// Discovers nodes on the local network.
     mdns: Toggle<Mdns>,
-    /// Stream that fires when we need to perform the next random Kademlia query.
-    next_kad_random_query: Interval,
-    /// After `next_kad_random_query` triggers, the next one triggers after this duration.
-    duration_to_next_kad: Duration,
     /// Events to return in priority when polled.
     pending_events: VecDeque<DiscoveryOut>,
     /// Number of nodes we're currently connected to.
@@ -63,8 +55,6 @@ pub struct DiscoveryBehaviour {
     peers: HashSet<PeerId>,
     /// Keeps hash map of peers and their multiaddresses
     peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
-    /// Number of active connections to pause discovery on.
-    discovery_max: u64,
 }
 
 impl DiscoveryBehaviour {
@@ -72,10 +62,6 @@ impl DiscoveryBehaviour {
         let local_peer_id = local_public_key.to_peer_id();
         let mut peers = HashSet::new();
         let peer_addresses = HashMap::new();
-
-        // Kademlia config
-        let store = MemoryStore::new(local_peer_id.to_owned());
-        let mut kad_config = KademliaConfig::default();
 
         let user_defined: Vec<(PeerId, Multiaddr)> = config
             .bootstrap_peers
@@ -92,18 +78,24 @@ impl DiscoveryBehaviour {
             })
             .collect();
 
-        let kademlia_opt = if config.kademlia {
-            let mut kademlia = Kademlia::with_config(local_peer_id, store, kad_config);
-            for (peer_id, addr) in user_defined.iter() {
-                kademlia.add_address(peer_id, addr.clone());
-                peers.insert(*peer_id);
+        let kademlia_opt = {
+            // Kademlia config
+            let store = MemoryStore::new(local_peer_id.to_owned());
+            let mut kad_config = KademliaConfig::default();
+
+            if config.kademlia {
+                let mut kademlia = Kademlia::with_config(local_peer_id, store, kad_config);
+                for (peer_id, addr) in user_defined.iter() {
+                    kademlia.add_address(peer_id, addr.clone());
+                    peers.insert(*peer_id);
+                }
+                if let Err(e) = kademlia.bootstrap() {
+                    warn!("Kademlia bootstrap failed: {}", e);
+                }
+                Some(kademlia)
+            } else {
+                None
             }
-            if let Err(e) = kademlia.bootstrap() {
-                warn!("Kademlia bootstrap failed: {}", e);
-            }
-            Some(kademlia)
-        } else {
-            None
         };
 
         let mdns_opt = if config.mdns {
@@ -119,14 +111,11 @@ impl DiscoveryBehaviour {
         DiscoveryBehaviour {
             user_defined,
             kademlia: kademlia_opt.into(),
-            next_kad_random_query: stream::interval(Duration::new(0, 0)),
-            duration_to_next_kad: Duration::from_secs(1),
             pending_events: VecDeque::new(),
             num_connections: 0,
             mdns: mdns_opt.into(),
             peers,
             peer_addresses,
-            discovery_max,
         }
     }
 
@@ -277,40 +266,15 @@ impl NetworkBehaviour for DiscoveryBehaviour {
             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev));
         }
 
-        // Poll the stream that fires when we need to start a random Kademlia query.
-        while self.next_kad_random_query.poll_next_unpin(cx).is_ready() {
-            if self.num_connections < self.discovery_max {
-                // We still have not hit the discovery max, send random request for peers.
-                let random_peer_id = PeerId::random();
-                debug!(
-                    "Libp2p <= Starting random Kademlia request for {:?}",
-                    random_peer_id
-                );
-                if let Some(k) = self.kademlia.as_mut() {
-                    k.get_closest_peers(random_peer_id);
-                }
-            }
-
-            // Schedule the next random query with exponentially increasing delay,
-            // capped at 60 seconds.
-            self.next_kad_random_query = stream::interval(self.duration_to_next_kad);
-            self.duration_to_next_kad =
-                cmp::min(self.duration_to_next_kad * 2, Duration::from_secs(60));
-        }
-
         // Poll Kademlia.
         while let Poll::Ready(ev) = self.kademlia.poll(cx, params) {
             match ev {
                 NetworkBehaviourAction::GenerateEvent(ev) => match ev {
-                    // Adding to Kademlia buckets is automatic with our config,
-                    // no need to do manually.
                     KademliaEvent::RoutingUpdated { .. } => {}
                     KademliaEvent::RoutablePeer { .. } => {}
-                    KademliaEvent::PendingRoutablePeer { .. } => {
-                        // Intentionally ignore
-                    }
+                    KademliaEvent::PendingRoutablePeer { .. } => {}
                     other => {
-                        debug!("Libp2p => Unhandled Kademlia event: {:?}", other)
+                        debug!("Kademlia event: {:?}", other)
                     }
                 },
                 NetworkBehaviourAction::DialAddress { address, handler } => {
@@ -361,13 +325,6 @@ impl NetworkBehaviour for DiscoveryBehaviour {
             match ev {
                 NetworkBehaviourAction::GenerateEvent(event) => match event {
                     MdnsEvent::Discovered(list) => {
-                        if self.num_connections >= self.discovery_max {
-                            // Already over discovery max, don't add discovered peers.
-                            // We could potentially buffer these addresses to be added later,
-                            // but mdns is not an important use case and may be removed in future.
-                            continue;
-                        }
-
                         // Add any discovered peers to Kademlia
                         for (peer_id, multiaddr) in list {
                             if let Some(kad) = self.kademlia.as_mut() {

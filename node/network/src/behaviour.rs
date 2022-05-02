@@ -1,13 +1,17 @@
 use crate::broadcast;
 use crate::broadcast::ProtoContext;
 use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
+use async_std::task;
 use futures::channel::mpsc;
-
-use crate::coordination::CoordinationBehaviour;
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::identity::Keypair;
-use libp2p::kad::QueryId;
+use libp2p::kad::store::MemoryStore;
+use libp2p::kad::{
+    Kademlia, KademliaConfig, KademliaEvent, PeerRecord, QueryId, QueryResult, Record,
+};
+use libp2p::mdns::{Mdns, MdnsEvent};
 use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess};
+use libp2p::swarm::toggle::Toggle;
 use libp2p::swarm::{CloseConnection, NetworkBehaviourEventProcess};
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
 use libp2p::NetworkBehaviour;
@@ -27,7 +31,7 @@ pub(crate) struct Behaviour {
     ping: Ping,
     identify: Identify,
     discovery: DiscoveryBehaviour,
-    coordination: CoordinationBehaviour,
+    /// Handles multiple communication of multiple generic protocols.
     broadcast: broadcast::GenericBroadcast,
 
     #[behaviour(ignore)]
@@ -51,8 +55,8 @@ impl Behaviour {
         params: &crate::Params,
         peerset: Peerset,
     ) -> Result<Behaviour, broadcast::RegisterError> {
-        let (coordination, peerset_handle) =
-            CoordinationBehaviour::new(params.network_config.clone());
+        let config = &params.network_config;
+        let local_peer_id = local_key.public().to_peer_id();
 
         Ok(Behaviour {
             broadcast: broadcast::GenericBroadcast::new(
@@ -60,7 +64,6 @@ impl Behaviour {
                 peerset.get_handle(),
             )?,
             discovery: DiscoveryBehaviour::new(local_key.public(), params.network_config.clone()),
-            coordination,
             identify: Identify::new(IdentifyConfig::new(
                 MPC_PROTOCOL_ID.into(),
                 local_key.public(),
@@ -95,13 +98,22 @@ impl Behaviour {
         connect: broadcast::IfDisconnected,
     ) {
         self.broadcast.broadcast_message(
-            self.peerset.state().connected_peers(),
+            vec![], // TODO: self.peerset.state().connected_peers(),
             protocol_id,
             ctx,
             message,
             pending_response,
             connect,
         );
+    }
+
+    pub fn peer_at_index(&self, index: usize) -> Option<PeerId> {
+        self.peerset.state().at_index(index)
+    }
+
+    /// Bootstrap Kademlia network.
+    pub fn bootstrap(&mut self) -> Result<QueryId, String> {
+        self.discovery.bootstrap()
     }
 
     /// Consumes the events list when polled.
@@ -115,16 +127,29 @@ impl Behaviour {
             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
         }
 
+        loop {
+            match futures::Stream::poll_next(Pin::new(&mut self.peerset), cx) {
+                Poll::Ready(Some(mpc_peerset::Message::Connect(addr))) => {
+                    return Poll::Ready(NetworkBehaviourAction::DialAddress {
+                        address: addr,
+                        handler: self.broadcast.new_handler(),
+                    });
+                }
+                Poll::Ready(Some(mpc_peerset::Message::Drop(peer_id))) => {
+                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
+                        peer_id,
+                        connection: CloseConnection::All,
+                    });
+                }
+                Poll::Ready(None) => {
+                    error!(target: "sub-libp2p", "Peerset receiver stream has returned None");
+                    break;
+                }
+                Poll::Pending => break,
+            }
+        }
+
         Poll::Pending
-    }
-
-    pub fn peer_at_index(&self, index: usize) -> Option<PeerId> {
-        self.peerset.state().at_index(index)
-    }
-
-    /// Bootstrap Kademlia network
-    pub fn bootstrap(&mut self) -> Result<QueryId, String> {
-        self.discovery.bootstrap()
     }
 }
 
@@ -157,13 +182,11 @@ impl NetworkBehaviourEventProcess<broadcast::BroadcastOut> for Behaviour {
     }
 }
 
-impl NetworkBehaviourEventProcess<DiscoveryOut> for Behaviour {
+impl NetworkBehaviourEventProcess<DiscoveryOut> for ForestBehaviour {
     fn inject_event(&mut self, event: DiscoveryOut) {
         match event {
-            DiscoveryOut::Connected(peer_id) => self.peerset.add_to_peers_set(peer_id),
-            DiscoveryOut::Disconnected(peer) => {
-                self.peerset.get_handle().remove_from_peers_set(peer_id);
-            }
+            DiscoveryOut::Connected(peer) => {}
+            DiscoveryOut::Disconnected(peer) => {}
         }
     }
 }
