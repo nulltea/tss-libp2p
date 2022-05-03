@@ -1,27 +1,12 @@
-// This file is part of Substrate.
-
-// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-
+// This file was a part of Substrate.
+mod ids;
 mod peer;
 mod state;
 
 use futures::{channel::mpsc, channel::oneshot, prelude::*};
 use libp2p::{Multiaddr, PeerId};
 use log::debug;
+use std::collections::hash_map::Entry;
 use std::collections::HashSet;
 use std::{
     collections::VecDeque,
@@ -30,15 +15,18 @@ use std::{
     time::Instant,
 };
 
+pub use crate::ids::*;
 pub use crate::peer::*;
 
 #[derive(Debug)]
 enum Action {
-    AddToPeersSet(PeerId),
-    RemoveFromPeersSet(PeerId),
-    GetPeerIndex(PeerId, oneshot::Sender<u16>),
-    GetPeerAtIndex(u16, oneshot::Sender<PeerId>),
-    GetPeerIds(oneshot::Sender<Vec<PeerId>>),
+    AddToPeersSet(SetId, PeerId),
+    RemoveFromPeersSet(SetId, PeerId),
+
+    RegisterSession(SessionId, SetId, oneshot::Sender<()>),
+    GetPeerIndex(SessionId, PeerId, oneshot::Sender<u16>),
+    GetPeerAtIndex(SessionId, u16, oneshot::Sender<PeerId>),
+    GetPeerIds(SessionId, oneshot::Sender<Vec<PeerId>>),
 }
 
 /// Shared handle to the peer set manager (PSM). Distributed around the code.
@@ -49,20 +37,32 @@ pub struct PeersetHandle {
 
 impl PeersetHandle {
     /// Add a peer to the set.
-    pub fn add_to_peers_set(&self, peer_id: PeerId) {
-        let _ = self.tx.unbounded_send(Action::AddToPeersSet(peer_id));
+    pub fn add_to_peers_set(&self, set_id: SetId, peer_id: PeerId) {
+        let _ = self
+            .tx
+            .unbounded_send(Action::AddToPeersSet(set_id, peer_id));
     }
 
     /// Remove a peer from the set.
-    pub fn remove_from_peers_set(&self, peer_id: PeerId) {
-        let _ = self.tx.unbounded_send(Action::RemoveFromPeersSet(peer_id));
+    pub fn remove_from_peers_set(&self, set_id: SetId, peer_id: PeerId) {
+        let _ = self
+            .tx
+            .unbounded_send(Action::RemoveFromPeersSet(set_id, peer_id));
+    }
+
+    pub fn register_session(&self, session_id: SessionId, set_id: SetId) {
+        let _ = self
+            .tx
+            .unbounded_send(Action::RegisterSession(session_id, set_id));
     }
 
     /// Returns the index of the peer.
-    pub async fn peer_index(self, peer_id: PeerId) -> Result<u16, ()> {
+    pub async fn peer_index(self, session_id: SessionId, peer_id: PeerId) -> Result<u16, ()> {
         let (tx, rx) = oneshot::channel();
 
-        let _ = self.tx.unbounded_send(Action::GetPeerIndex(peer_id, tx));
+        let _ = self
+            .tx
+            .unbounded_send(Action::GetPeerIndex(session_id, peer_id, tx));
 
         // The channel is closed only if sender refuses sending index,
         // due to that peer not being a part of the set.
@@ -70,10 +70,12 @@ impl PeersetHandle {
     }
 
     /// Returns the index of the peer.
-    pub async fn peer_at_index(self, index: u16) -> Result<PeerId, ()> {
+    pub async fn peer_at_index(self, session_id: SessionId, index: u16) -> Result<PeerId, ()> {
         let (tx, rx) = oneshot::channel();
 
-        let _ = self.tx.unbounded_send(Action::GetPeerAtIndex(index, tx));
+        let _ = self
+            .tx
+            .unbounded_send(Action::GetPeerAtIndex(session_id, index, tx));
 
         // The channel is closed only if sender refuses sending index,
         // due to that peer not being a part of the set.
@@ -81,10 +83,13 @@ impl PeersetHandle {
     }
 
     /// Returns the ids of all peers in the set.
-    pub async fn peer_ids(self) -> Result<impl ExactSizeIterator<Item = PeerId>, ()> {
+    pub async fn peer_ids(
+        self,
+        session_id: SessionId,
+    ) -> Result<impl ExactSizeIterator<Item = PeerId>, ()> {
         let (tx, rx) = oneshot::channel();
 
-        let _ = self.tx.unbounded_send(Action::GetPeerIds(tx));
+        let _ = self.tx.unbounded_send(Action::GetPeerIds(session_id, tx));
 
         rx.await.map_err(|_| ()).map(|r| r.into_iter())
     }
@@ -95,25 +100,30 @@ impl PeersetHandle {
 pub enum Message {
     /// Request to open a connection to the given peer. From the point of view of the PSM, we are
     /// immediately connected.
-    Connect(Multiaddr),
+    Connect {
+        set_id: SetId,
+        peer_id: PeerId,
+        addr: Multiaddr,
+    },
 
     /// Drop the connection to the given peer, or cancel the connection attempt after a `Connect`.
-    Drop(PeerId),
-}
+    Drop { set_id: SetId, peer_id: PeerId },
 
-/// Opaque identifier for an incoming connection. Allocated by the network.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct IncomingIndex(pub u64);
-
-impl From<u64> for IncomingIndex {
-    fn from(val: u64) -> Self {
-        Self(val)
-    }
+    AssembleSet {
+        rx: oneshot::Sender<()>, // todo
+    },
 }
 
 /// Configuration to pass when creating the peer set manager.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PeersetConfig {
+    /// List of sets of nodes the peerset manages.
+    pub sets: Vec<SetConfig>,
+}
+
+/// Configuration for a single set of nodes.
+#[derive(Debug, Clone)]
+pub struct SetConfig {
     /// Maximum number of ingoing links to peers.
     /// Zero value means unlimited.
     pub target_size: u32,
@@ -125,7 +135,7 @@ pub struct PeersetConfig {
     pub boot_nodes: Vec<PeerId>,
 }
 
-impl PeersetConfig {
+impl SetConfig {
     pub fn new(peers: impl Iterator<Item = PeerId>, target_size: u32) -> Self {
         Self {
             target_size,
@@ -169,7 +179,7 @@ pub struct Peerset {
 
 impl Peerset {
     /// Builds a new peerset from the given configuration.
-    pub fn from_config(local_peer_id: PeerId, config: PeersetConfig) -> (Self, PeersetHandle) {
+    pub fn from_config(config: PeersetConfig) -> (Self, PeersetHandle) {
         let (tx, rx) = mpsc::unbounded();
 
         let handle = PeersetHandle { tx: tx.clone() };
@@ -178,7 +188,7 @@ impl Peerset {
             let now = Instant::now();
 
             Self {
-                data: state::PeersState::new(local_peer_id, config.clone()),
+                data: state::PeersState::new(config.sets),
                 tx,
                 rx,
                 message_queue: VecDeque::new(),
@@ -186,8 +196,14 @@ impl Peerset {
             }
         };
 
-        for peer_id in config.boot_nodes {
-            peerset.add_to_peers_set(peer_id);
+        for (set, set_config) in config.sets.into_iter().enumerate() {
+            for peer_id in set_config.bootnodes {
+                if let peersstate::Peer::Unknown(entry) = peerset.data.peer(set, &peer_id) {
+                    entry.discover();
+                } else {
+                    debug!(target: "peerset", "Duplicate boot node in config: {:?}", peer_id);
+                }
+            }
         }
 
         (peerset, handle)
@@ -212,16 +228,17 @@ impl Peerset {
     /// try to connect to it.
     ///
     /// > **Note**: This has the same effect as [`PeersetHandle::add_to_peers_set`].
-    pub fn add_to_peers_set(&mut self, peer_id: PeerId) {
-        if let Peer::Unknown(entry) = self.data.peer(&peer_id) {
+    pub fn add_to_peers_set(&mut self, set_id: SetId, peer_id: PeerId) {
+        if let Peer::Unknown(entry) = self.data.peer(set_id.into(), &peer_id) {
             entry.discover();
         }
     }
 
-    fn on_remove_from_peers_set(&mut self, peer_id: PeerId) {
-        match self.data.peer(&peer_id) {
+    fn on_remove_from_peers_set(&mut self, set_id: SetId, peer_id: PeerId) {
+        match self.data.peer(set_id.into(), &peer_id) {
             Peer::Connected(peer) => {
-                self.message_queue.push_back(Message::Drop(*peer.peer_id()));
+                self.message_queue
+                    .push_back(Message::Drop { set_id, peer_id });
                 peer.disconnect().forget_peer();
             }
             Peer::NotConnected(peer) => {
@@ -247,6 +264,21 @@ impl Peerset {
         }
     }
 
+    fn register_session(
+        &mut self,
+        session_id: SessionId,
+        set_id: SetId,
+        pending_result: oneshot::Sender<()>,
+    ) {
+        match self.data.sessions.entry(session_id) {
+            Entry::Occupied(e) => pending_result.send(()),
+            Entry::Vacant(e) => {
+                e.insert(set_id.into());
+                self.message_queue.push_back(Message::AssembleSet {}); // todo
+            }
+        };
+    }
+
     /// Returns the number of peers that we have discovered.
     pub fn num_discovered_peers(&self) -> usize {
         self.data.nodes.len()
@@ -269,16 +301,21 @@ impl Stream for Peerset {
             };
 
             match action {
-                Action::AddToPeersSet(peer_id) => self.add_to_peers_set(peer_id),
-                Action::RemoveFromPeersSet(peer_id) => self.on_remove_from_peers_set(peer_id),
-                Action::GetPeerIndex(peer_id, pending_result) => {
+                Action::AddToPeersSet(set_id, peer_id) => self.add_to_peers_set(set_id, peer_id),
+                Action::RemoveFromPeersSet(set_id, peer_id) => {
+                    self.on_remove_from_peers_set(set_id, peer_id)
+                }
+                Action::GetPeerIndex(session_id, peer_id, pending_result) => {
                     self.get_peer_index(peer_id, pending_result)
                 }
-                Action::GetPeerAtIndex(index, pending_result) => {
+                Action::GetPeerAtIndex(session_id, index, pending_result) => {
                     self.get_peer_id(index, pending_result)
                 }
-                Action::GetPeerIds(pending_result) => {
+                Action::GetPeerIds(session_id, pending_result) => {
                     pending_result.send(self.data.peer_ids().collect());
+                }
+                Action::RegisterSession(session_id, set_id, ready) => {
+                    self.register_session(ession_id, set_id, ready)
                 }
             }
         }

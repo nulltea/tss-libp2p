@@ -3,6 +3,7 @@ use crate::broadcast::ProtoContext;
 use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
 use async_std::task;
 use futures::channel::mpsc;
+use libp2p::core::connection::ConnectionId;
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
@@ -18,8 +19,9 @@ use libp2p::NetworkBehaviour;
 use libp2p::PeerId;
 use log::{debug, error, trace, warn};
 use mpc_peerset::Peerset;
+use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -38,6 +40,10 @@ pub(crate) struct Behaviour {
     events: VecDeque<BehaviourOut>,
     #[behaviour(ignore)]
     peerset: Peerset,
+    #[behaviour(ignore)]
+    peers: HashMap<PeerId, PeerState>,
+    #[behaviour(ignore)]
+    sessions: HashMap<u64, SessionState>,
 }
 
 pub(crate) enum BehaviourOut {
@@ -58,6 +64,11 @@ impl Behaviour {
         let config = &params.network_config;
         let local_peer_id = local_key.public().to_peer_id();
 
+        let mut peers = HashMap::default();
+        for peer in params.network_config.bootstrap_peers {
+            peers.insert(peer.peer_id, PeerState::Dialing)
+        }
+
         Ok(Behaviour {
             broadcast: broadcast::GenericBroadcast::new(
                 params.broadcast_protocols.into_iter(),
@@ -71,6 +82,8 @@ impl Behaviour {
             ping: Ping::default(),
             events: VecDeque::new(),
             peerset,
+            peers,
+            sessions: Default::default(),
         })
     }
 
@@ -182,7 +195,7 @@ impl NetworkBehaviourEventProcess<broadcast::BroadcastOut> for Behaviour {
     }
 }
 
-impl NetworkBehaviourEventProcess<DiscoveryOut> for ForestBehaviour {
+impl NetworkBehaviourEventProcess<DiscoveryOut> for Behaviour {
     fn inject_event(&mut self, event: DiscoveryOut) {
         match event {
             DiscoveryOut::Connected(peer) => {}
@@ -233,4 +246,17 @@ impl NetworkBehaviourEventProcess<PingEvent> for Behaviour {
             }
         }
     }
+}
+
+enum PeerState {
+    Connected {
+        connections: SmallVec<[ConnectionId; crate::MAX_CONNECTIONS_PER_PEER]>,
+    },
+    Dialing,
+    Dropped,
+}
+
+struct SessionState {
+    protocol_id: Cow<'static, str>,
+    parties: HashSet<(PeerId, PeerState)>,
 }

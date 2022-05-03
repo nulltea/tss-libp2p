@@ -91,7 +91,7 @@ impl NetworkWorker {
 
             mpc_peerset::Peerset::from_config(
                 local_peer_id.clone(),
-                mpc_peerset::PeersetConfig::new_static(peers),
+                mpc_peerset::SetConfig::new_static(peers),
             )
         };
 

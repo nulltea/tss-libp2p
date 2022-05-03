@@ -1,6 +1,6 @@
-use crate::state::PeersState;
+use crate::state::{Node, PeersState};
 use libp2p::PeerId;
-use log::error;
+use log::{debug, error};
 use std::borrow::Cow;
 use std::time::Instant;
 
@@ -45,6 +45,7 @@ impl<'a> Peer<'a> {
 
 /// A peer that is connected to us.
 pub struct ConnectedPeer<'a> {
+    pub(crate) set: usize,
     pub(crate) state: &'a mut PeersState,
     pub(crate) peer_id: Cow<'a, PeerId>,
 }
@@ -62,9 +63,9 @@ impl<'a> ConnectedPeer<'a> {
 
     /// Switches the peer to "not connected".
     pub fn disconnect(self) -> NotConnectedPeer<'a> {
-        if let Some(state) = self.state.nodes.get_mut(&*self.peer_id) {
-            match state {
-                MembershipState::Connected => self.state.set.num_peers -= 1,
+        if let Some(node) = self.state.nodes.get_mut(&*self.peer_id) {
+            match node.sets[self.set] {
+                MembershipState::Connected => self.state.sets[self.set].num_peers -= 1,
                 MembershipState::NotMember | MembershipState::NotConnected { .. } => {
                     debug_assert!(
                         false,
@@ -72,17 +73,15 @@ impl<'a> ConnectedPeer<'a> {
                     )
                 }
             }
-            *state = MembershipState::NotConnected {
+            node.sets[self.set] = MembershipState::NotConnected {
                 last_connected: Instant::now(),
             };
         } else {
-            debug_assert!(
-                false,
-                "State inconsistency: disconnecting a disconnected node"
-            );
+            debug!("State inconsistency: disconnecting a disconnected node");
         }
 
         NotConnectedPeer {
+            set: self.set,
             state: self.state,
             peer_id: self.peer_id,
         }
@@ -92,6 +91,7 @@ impl<'a> ConnectedPeer<'a> {
 /// A peer that is not connected to us.
 #[derive(Debug)]
 pub struct NotConnectedPeer<'a> {
+    pub(crate) set: usize,
     pub(crate) state: &'a mut PeersState,
     pub(crate) peer_id: Cow<'a, PeerId>,
 }
@@ -104,21 +104,19 @@ impl<'a> NotConnectedPeer<'a> {
 
     /// Tries to accept the peer as an incoming connection.
     pub fn try_accept_peer(self) -> Result<ConnectedPeer<'a>, Self> {
-        if self.state.set.num_peers >= self.state.set.target_size {
+        if self.state.sets[self.set].num_peers >= self.state.sets[self.set].target_size {
             return Err(self);
         }
 
-        if let Some(peer) = self.state.nodes.get_mut(&*self.peer_id) {
-            *peer = MembershipState::Connected;
-            self.state.set.num_peers += 1;
+        if let Some(node) = self.state.nodes.get_mut(&*self.peer_id) {
+            node.sets[self.set] = MembershipState::Connected;
+            self.state.sets[self.set].num_peers += 1;
         } else {
-            debug_assert!(
-                false,
-                "State inconsistency: try_accept_incoming on an unknown node"
-            );
+            debug!("State inconsistency: try_accept_incoming on an unknown node");
         }
 
         Ok(ConnectedPeer {
+            set: self.set,
             state: self.state,
             peer_id: self.peer_id,
         })
@@ -126,11 +124,15 @@ impl<'a> NotConnectedPeer<'a> {
 
     /// Removes the peer from the list of members of the set.
     pub fn forget_peer(self) -> UnknownPeer<'a> {
-        if let Some(peer) = self.state.nodes.get_mut(&*self.peer_id) {
-            *peer = MembershipState::NotMember;
+        if let Some(node) = self.state.nodes.get_mut(&*self.peer_id) {
+            node.sets[self.set] = MembershipState::NotMember;
 
             // Remove the peer from `self.state.nodes` entirely if it isn't a member of any set.
-            if matches!(peer, MembershipState::NotMember) {
+            if peer
+                .sets
+                .iter()
+                .all(|set| matches!(set, MembershipState::NotMember))
+            {
                 self.state.nodes.remove(&*self.peer_id);
             }
         } else {
@@ -142,6 +144,7 @@ impl<'a> NotConnectedPeer<'a> {
         };
 
         UnknownPeer {
+            set: self.set,
             parent: self.state,
             peer_id: self.peer_id,
         }
@@ -150,6 +153,7 @@ impl<'a> NotConnectedPeer<'a> {
 
 /// A peer that we have never heard of or that isn't part of the set.
 pub struct UnknownPeer<'a> {
+    pub(crate) set: usize,
     pub(crate) parent: &'a mut PeersState,
     pub(crate) peer_id: Cow<'a, PeerId>,
 }
@@ -157,14 +161,18 @@ pub struct UnknownPeer<'a> {
 impl<'a> UnknownPeer<'a> {
     /// Inserts the peer identity in our list.
     pub fn discover(self) -> NotConnectedPeer<'a> {
+        let num_sets = self.parent.sets.len();
+
         self.parent
             .nodes
             .entry(self.peer_id.clone().into_owned())
-            .or_insert_with(|| MembershipState::NotConnected {
-                last_connected: Instant::now(),
-            });
+            .or_insert_with(|| Node::new(num_sets))
+            .sets[self.set] = MembershipState::NotConnected {
+            last_connected: Instant::now(),
+        };
 
         NotConnectedPeer {
+            set: self.set,
             state: self.parent,
             peer_id: self.peer_id,
         }

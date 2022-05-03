@@ -17,8 +17,10 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{
-    ConnectedPeer, MembershipState, NotConnectedPeer, Peer, PeersetConfig, SetInfo, UnknownPeer,
+    ConnectedPeer, MembershipState, NotConnectedPeer, Peer, SessionId, SetConfig, SetId, SetInfo,
+    UnknownPeer,
 };
+use fnv::FnvHashMap;
 use itertools::Itertools;
 use libp2p::PeerId;
 use std::{borrow::Cow, collections::HashMap};
@@ -31,50 +33,65 @@ use std::{borrow::Cow, collections::HashMap};
 /// is either connected to us or not.
 #[derive(Debug, Clone)]
 pub struct PeersState {
-    local_peer_id: PeerId,
     /// List of nodes that we know about.
-    pub(crate) nodes: HashMap<PeerId, MembershipState>,
+    pub(crate) nodes: HashMap<PeerId, Node>,
 
     /// Configuration of the set.
-    pub(crate) set: SetInfo,
+    pub(crate) sets: Vec<SetInfo>,
+
+    /// Sets utilization mapped by session ids.
+    pub(crate) sessions: HashMap<SessionId, usize>,
 }
 
 impl PeersState {
     /// Builds a new empty [`PeersState`].
-    pub fn new(local_peer_id: PeerId, config: PeersetConfig) -> Self {
+    pub fn new(sets: impl IntoIterator<Item = SetConfig>) -> Self {
         Self {
-            local_peer_id,
-            nodes: HashMap::new(),
-            set: SetInfo {
-                num_peers: 0,
-                target_size: config.target_size,
-                initial_nodes: config.boot_nodes.into_iter().collect(),
-            },
+            nodes: HashMap::default(),
+            sets: sets
+                .into_iter()
+                .map(|config| SetInfo {
+                    num_peers: 0,
+                    target_size: config.target_size,
+                    initial_nodes: config.boot_nodes.into_iter().collect(),
+                })
+                .collect(),
+            sessions: HashMap::default(),
         }
     }
 
+    /// Returns the number of sets.
+    pub fn num_sets(&self) -> usize {
+        self.sets.len()
+    }
+
     /// Returns an object that grants access to the state of a peer in the context of the set.
-    pub fn peer<'a>(&'a mut self, peer_id: &'a PeerId) -> Peer<'a> {
-        match self.nodes.get(peer_id).map(|s| *s) {
+    pub fn peer<'a>(&'a mut self, set: usize, peer_id: &'a PeerId) -> Option<Peer<'a>> {
+        if self.sets.len() >= set {
+            return None;
+        }
+
+        Some(match self.nodes.get(peer_id).map(|n| *n.sets[set]) {
             None | Some(MembershipState::NotMember) => Peer::Unknown(UnknownPeer {
+                set,
                 parent: self,
                 peer_id: Cow::Borrowed(peer_id),
             }),
             Some(MembershipState::Connected) => Peer::Connected(ConnectedPeer {
+                set,
                 state: self,
                 peer_id: Cow::Borrowed(peer_id),
             }),
             Some(MembershipState::NotConnected { .. }) => Peer::NotConnected(NotConnectedPeer {
+                set,
                 state: self,
                 peer_id: Cow::Borrowed(peer_id),
             }),
-        }
+        })
     }
 
     /// Returns the list of all the peers we know of.
-    // Note: this method could theoretically return a `Peer`, but implementing that
-    // isn't simple.
-    pub fn peer_ids(&self) -> impl ExactSizeIterator<Item = PeerId> + '_ {
+    pub fn peer_ids(&self) -> impl ExactSizeIterator<Item = PeerId> {
         self.nodes.keys().map(|p| p.clone())
     }
 
@@ -104,19 +121,46 @@ impl PeersState {
     }
 
     /// Returns the list of peers we are connected to in the context of the set.
-    pub fn connected_peers(&self) -> impl Iterator<Item = &PeerId> {
-        self.nodes
-            .iter()
-            .filter(move |(p, n)| n.is_connected() && p.to_bytes() != self.local_peer_id.to_bytes())
-            .map(|(p, _)| p)
+    pub fn connected_peers(&self, set: usize) -> Option<impl Iterator<Item = &PeerId>> {
+        if self.sets.len() >= set {
+            return None;
+        }
+
+        Some(
+            self.nodes
+                .iter()
+                .filter(move |(p, n)| n.sets[set].is_connected())
+                .map(|(p, _)| p),
+        )
     }
 
     /// Returns peer's membership state in the set.
-    pub fn peer_membership(&self, peer_id: &PeerId) -> MembershipState {
-        self.nodes
-            .iter()
-            .find(move |(p, _)| p.to_bytes() == peer_id.to_bytes())
-            .map(|(_, s)| *s)
-            .unwrap_or(MembershipState::NotMember)
+    pub fn peer_membership(&self, peer_id: &PeerId, set: usize) -> Option<MembershipState> {
+        if !self.sets.contains_key(&session_id) {
+            return None;
+        }
+
+        Some(
+            self.nodes
+                .iter()
+                .find(move |(p, _)| p.to_bytes() == peer_id.to_bytes())
+                .map(|(_, s)| *s.sets[set])
+                .unwrap_or(MembershipState::NotMember),
+        )
+    }
+}
+
+/// State of a single node that we know about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Node {
+    /// Map of sets the node to session_ids.
+    pub(crate) sets: Vec<MembershipState>,
+}
+
+impl Node {
+    pub(crate) fn new(num_sets: usize) -> Self {
+        Self {
+            sets: (0..num_sets).map(|_| MembershipState::NotMember).collect(),
+        }
     }
 }
