@@ -12,13 +12,14 @@ use libp2p::PeerId;
 use log::error;
 use mpc_api::RpcApi;
 use mpc_p2p::{broadcast, NetworkConfig, NetworkWorker, NodeKeyConfig, Params, Secret};
+use mpc_peerset::{Peerset, PeersetConfig, SetConfig};
 use mpc_rpc::server::JsonRPCServer;
 use mpc_runtime::RuntimeDaemon;
 use mpc_tss::{generate_config, Config, KEYGEN_PROTOCOL_ID};
 use sha3::Digest;
 use std::borrow::Cow;
 use std::error::Error;
-use std::process;
+use std::{iter, process};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -50,27 +51,35 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         .unwrap()
         .clone();
 
+    let boot_peers = config.parties.clone().into_iter().map(|p| p.network_peer);
+
+    let (peerset, peerset_handle) = {
+        Peerset::from_config(PeersetConfig {
+            sets: vec![SetConfig::new(
+                boot_peers.clone(),
+                config.parties.len() as u32,
+            )],
+        })
+    };
+
     let (keygen_config, keygen_receiver) = broadcast::ProtocolConfig::new_with_receiver(
         KEYGEN_PROTOCOL_ID.into(),
         config.parties.len() - 1,
     );
 
     let (net_worker, net_service) = {
-        let _local_party_addr = local_party.network_peer.multiaddr.clone();
-        let network_peers = config.parties.into_iter().map(|p| p.network_peer);
-        let network_config =
-            NetworkConfig{
-                listen_address: local_party.clone().network_peer.,
-                public_addresses: vec![],
-                bootstrap_peers: vec![],
-                mdns: args.mdns,
-                kademlia: args.kademlia
-            };
+        let network_config = NetworkConfig {
+            listen_address: local_party.network_peer.multiaddr.clone(),
+            bootstrap_peers: boot_peers,
+            mdns: args.mdns,
+            kademlia: args.kademlia,
+        };
 
         let broadcast_protocols = vec![keygen_config];
 
         NetworkWorker::new(
             node_key,
+            peerset,
             Params {
                 network_config,
                 broadcast_protocols,
@@ -84,6 +93,7 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
 
     let (rt_worker, rt_service) = RuntimeDaemon::new(
         net_service,
+        peerset_handle,
         vec![((Cow::Borrowed(KEYGEN_PROTOCOL_ID), keygen_receiver))].into_iter(),
     );
 

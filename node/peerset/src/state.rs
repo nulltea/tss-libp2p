@@ -91,33 +91,31 @@ impl PeersState {
     }
 
     /// Returns the list of all the peers we know of.
-    pub fn peer_ids(&self) -> impl ExactSizeIterator<Item = PeerId> {
-        self.nodes.keys().map(|p| p.clone())
+    pub fn peer_ids(&self, set: usize) -> impl Iterator<Item = PeerId> {
+        self.nodes
+            .iter()
+            .filter(move |(_, n)| n.sets[set].is_member())
+            .map(|(p, _)| p.clone())
     }
 
     /// Returns the index of a specified peer in a given set.
-    pub fn index_of(&self, peer: PeerId) -> Option<usize> {
+    pub fn index_of(&self, set: usize, peer: PeerId) -> Option<usize> {
         self.nodes
             .iter()
-            .map(|(p, _)| p)
-            .sorted_by_key(|p| p.to_bytes())
+            .filter(move |(_, n)| n.sets[set].is_member())
+            .sorted_by_key(|(p, _)| p.to_bytes())
             .position(|elem| *elem == peer)
     }
 
     /// Returns the index of a specified peer in a given set.
-    pub fn at_index(&self, index: usize) -> Option<PeerId> {
-        let peers: Vec<&PeerId> = self
-            .nodes
+    pub fn at_index(&self, set: usize, index: usize) -> Option<PeerId> {
+        self.nodes
             .iter()
+            .filter(move |(_, n)| n.sets[set].is_member())
             .map(|(p, _)| p)
             .sorted_by_key(|p| p.to_bytes())
-            .collect();
-
-        if peers.len() > index {
-            Some(peers[index].clone())
-        } else {
-            None
-        }
+            .enumerate()
+            .find_map(move |(i, p)| if i == index { Some(p.clone()) } else { None })
     }
 
     /// Returns the list of peers we are connected to in the context of the set.
@@ -158,6 +156,20 @@ pub(crate) struct Node {
 }
 
 impl Node {
+    pub(crate) fn new(num_sets: usize) -> Self {
+        Self {
+            sets: (0..num_sets).map(|_| MembershipState::NotMember).collect(),
+        }
+    }
+}
+
+/// State of a single node that we know about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Session {
+    pub(crate) set: usize,
+}
+
+impl Session {
     pub(crate) fn new(num_sets: usize) -> Self {
         Self {
             sets: (0..num_sets).map(|_| MembershipState::NotMember).collect(),

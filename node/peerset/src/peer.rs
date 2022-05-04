@@ -207,4 +207,8 @@ impl MembershipState {
     pub fn is_not_connected(self) -> bool {
         matches!(self, Self::NotConnected { .. })
     }
+
+    pub fn is_member(self) -> bool {
+        !matches!(self, Self::NotMember)
+    }
 }

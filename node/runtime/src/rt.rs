@@ -10,6 +10,7 @@ use futures_util::{future, pin_mut, select, FutureExt, SinkExt};
 use log::{error, info};
 use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
 use mpc_p2p::{broadcast, NetworkService};
+use mpc_peerset::{PeersetConfig, PeersetHandle};
 use round_based::{AsyncProtocol, Msg, StateMachine};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -48,12 +49,14 @@ pub struct RuntimeDaemon {
     network_service: NetworkService,
     protocol_receivers:
         RwLock<HashMap<Cow<'static, str>, mpsc::Receiver<broadcast::IncomingMessage>>>,
+    peerset: PeersetHandle,
     from_service: mpsc::Receiver<RuntimeMessage>,
 }
 
 impl RuntimeDaemon {
     pub fn new(
         network_service: NetworkService,
+        peerset: PeersetHandle,
         protocol_receivers: impl Iterator<
             Item = (
                 Cow<'static, str>,
@@ -66,6 +69,7 @@ impl RuntimeDaemon {
         let worker = Self {
             network_service,
             protocol_receivers: RwLock::new(protocol_receivers.collect()),
+            peerset,
             from_service: rx,
         };
 

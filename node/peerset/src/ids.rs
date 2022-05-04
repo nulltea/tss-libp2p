@@ -45,3 +45,8 @@ impl From<SessionId> for u64 {
         id.0
     }
 }
+
+pub enum SetSize {
+    Exact(usize),
+    AtLeast(usize),
+}

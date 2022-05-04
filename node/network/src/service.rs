@@ -15,7 +15,7 @@ use libp2p::swarm::{AddressScore, SwarmEvent};
 use libp2p::tcp::TcpConfig;
 use libp2p::{mplex, noise, Multiaddr, PeerId, Swarm, Transport};
 use log::{error, info, warn};
-use mpc_peerset::MembershipState;
+use mpc_peerset::{MembershipState, Peerset, PeersetHandle};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::thread::sleep;
@@ -72,28 +72,17 @@ pub struct NetworkService {
 impl NetworkWorker {
     pub fn new(
         node_key: NodeKeyConfig,
+        peerset: Peerset,
         params: config::Params,
     ) -> Result<(NetworkWorker, NetworkService), Error> {
         let keypair = node_key.into_keypair().map_err(|e| Error::Io(e))?;
         let local_peer_id = PeerId::from(keypair.public());
+        let peerset_handle = peerset.get_handle();
         info!(
             target: "sub-libp2p",
             "🏷 Local node identity is: {}",
             local_peer_id.to_base58(),
         );
-
-        let (peerset, peerset_handle) = {
-            let peers = params
-                .network_config
-                .bootstrap_peers
-                .into_iter()
-                .map(|p| p.peer_id);
-
-            mpc_peerset::Peerset::from_config(
-                local_peer_id.clone(),
-                mpc_peerset::SetConfig::new_static(peers),
-            )
-        };
 
         let transport = {
             let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
@@ -114,6 +103,7 @@ impl NetworkWorker {
                 max_request_size: 0,
                 max_response_size: 0,
                 request_timeout: Default::default(),
+
                 inbound_queue: None,
             });
 
@@ -122,7 +112,7 @@ impl NetworkWorker {
                 Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
                     return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
                 }
-            };
+            }
         };
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);

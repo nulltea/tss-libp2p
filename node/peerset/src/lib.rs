@@ -23,7 +23,7 @@ enum Action {
     AddToPeersSet(SetId, PeerId),
     RemoveFromPeersSet(SetId, PeerId),
 
-    RegisterSession(SessionId, SetId, oneshot::Sender<()>),
+    RegisterSession(SessionId, SetId, SetSize, oneshot::Sender<()>),
     GetPeerIndex(SessionId, PeerId, oneshot::Sender<u16>),
     GetPeerAtIndex(SessionId, u16, oneshot::Sender<PeerId>),
     GetPeerIds(SessionId, oneshot::Sender<Vec<PeerId>>),
@@ -109,8 +109,10 @@ pub enum Message {
     /// Drop the connection to the given peer, or cancel the connection attempt after a `Connect`.
     Drop { set_id: SetId, peer_id: PeerId },
 
-    AssembleSet {
-        rx: oneshot::Sender<()>, // todo
+    GatherSet {
+        session_id: SessionId,
+        target_size: SetSize,
+        on_ready: oneshot::Sender<()>,
     },
 }
 
@@ -226,8 +228,6 @@ impl Peerset {
 
     /// Adds a node to the given set. The peerset will, if possible and not already the case,
     /// try to connect to it.
-    ///
-    /// > **Note**: This has the same effect as [`PeersetHandle::add_to_peers_set`].
     pub fn add_to_peers_set(&mut self, set_id: SetId, peer_id: PeerId) {
         if let Peer::Unknown(entry) = self.data.peer(set_id.into(), &peer_id) {
             entry.discover();
@@ -248,7 +248,20 @@ impl Peerset {
         }
     }
 
-    fn get_peer_index(&mut self, peer_id: PeerId, pending_result: oneshot::Sender<u16>) {
+    fn get_peer_index(
+        &mut self,
+        session_id: SessionId,
+        peer_id: PeerId,
+        pending_result: oneshot::Sender<u16>,
+    ) {
+        let set_id = match self.data.sessions.get(&session_id) {
+            Some(set_id) => set_id,
+            None => {
+                drop(pending_result);
+                return;
+            }
+        };
+
         if let Some(index) = self.data.index_of(peer_id) {
             let _ = pending_result.send(index as u16);
         } else {
@@ -268,15 +281,21 @@ impl Peerset {
         &mut self,
         session_id: SessionId,
         set_id: SetId,
-        pending_result: oneshot::Sender<()>,
+        target_size: SetSize,
+        on_ready: oneshot::Sender<()>,
     ) {
         match self.data.sessions.entry(session_id) {
-            Entry::Occupied(e) => pending_result.send(()),
             Entry::Vacant(e) => {
                 e.insert(set_id.into());
-                self.message_queue.push_back(Message::AssembleSet {}); // todo
             }
+            _ => {}
         };
+
+        self.message_queue.push_back(Message::GatherSet {
+            session_id,
+            target_size,
+            on_ready,
+        });
     }
 
     /// Returns the number of peers that we have discovered.
@@ -306,7 +325,7 @@ impl Stream for Peerset {
                     self.on_remove_from_peers_set(set_id, peer_id)
                 }
                 Action::GetPeerIndex(session_id, peer_id, pending_result) => {
-                    self.get_peer_index(peer_id, pending_result)
+                    self.get_peer_index(session_id, peer_id, pending_result)
                 }
                 Action::GetPeerAtIndex(session_id, index, pending_result) => {
                     self.get_peer_id(index, pending_result)
@@ -314,8 +333,8 @@ impl Stream for Peerset {
                 Action::GetPeerIds(session_id, pending_result) => {
                     pending_result.send(self.data.peer_ids().collect());
                 }
-                Action::RegisterSession(session_id, set_id, ready) => {
-                    self.register_session(ession_id, set_id, ready)
+                Action::RegisterSession(session_id, set_id, target_size, on_ready) => {
+                    self.register_session(session_id, set_id, target_size, on_ready)
                 }
             }
         }
