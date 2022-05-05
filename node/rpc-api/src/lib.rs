@@ -61,14 +61,14 @@ impl<T, E: Display> Future for AsyncResult<T, E> {
 }
 
 impl mpc_rpc::JsonRPCHandler for RpcApi {
-    fn keygen(&self, t: u16) -> RpcFuture<RpcResult<Point<Secp256k1>>> {
+    fn keygen(&self, n: u16, t: u16) -> RpcFuture<RpcResult<Point<Secp256k1>>> {
         let (agent, rx) = DKG::new(t, "data/player_{}/key.share".to_string());
 
         let mut rt_service = self.rt_service.clone();
 
         task::spawn(async move {
             rt_service
-                .join_computation(0, mpc_runtime::ProtocolAgent::Keygen(Box::new(agent)))
+                .join_computation(n, mpc_runtime::ProtocolAgent::Keygen(Box::new(agent)))
                 .await;
         });
 

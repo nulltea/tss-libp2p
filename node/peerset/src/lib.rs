@@ -6,6 +6,7 @@ mod state;
 use futures::{channel::mpsc, channel::oneshot, prelude::*};
 use libp2p::{Multiaddr, PeerId};
 use log::debug;
+use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::HashSet;
 use std::{
@@ -17,6 +18,7 @@ use std::{
 
 pub use crate::ids::*;
 pub use crate::peer::*;
+use crate::state::Node;
 
 #[derive(Debug)]
 enum Action {
@@ -50,14 +52,18 @@ impl PeersetHandle {
             .unbounded_send(Action::RemoveFromPeersSet(set_id, peer_id));
     }
 
-    pub fn register_session(&self, session_id: SessionId, set_id: SetId) {
+    pub async fn register_session(&self, session_id: SessionId, set_id: SetId, size: SetSize) {
+        let (tx, rx) = oneshot::channel();
+
         let _ = self
             .tx
-            .unbounded_send(Action::RegisterSession(session_id, set_id));
+            .unbounded_send(Action::RegisterSession(session_id, set_id, size, tx));
+
+        rx.await;
     }
 
     /// Returns the index of the peer.
-    pub async fn peer_index(self, session_id: SessionId, peer_id: PeerId) -> Result<u16, ()> {
+    pub async fn index_of_peer(self, session_id: SessionId, peer_id: PeerId) -> Result<u16, ()> {
         let (tx, rx) = oneshot::channel();
 
         let _ = self
@@ -108,12 +114,12 @@ pub enum Message {
 
     /// Drop the connection to the given peer, or cancel the connection attempt after a `Connect`.
     Drop { set_id: SetId, peer_id: PeerId },
-
-    GatherSet {
-        session_id: SessionId,
-        target_size: SetSize,
-        on_ready: oneshot::Sender<()>,
-    },
+    // GatherSet {
+    //     protocol_id: Cow<'static, str>,
+    //     session_id: SessionId,
+    //     target_size: SetSize,
+    //     on_ready: oneshot::Sender<()>,
+    // },
 }
 
 /// Configuration to pass when creating the peer set manager.
@@ -199,8 +205,8 @@ impl Peerset {
         };
 
         for (set, set_config) in config.sets.into_iter().enumerate() {
-            for peer_id in set_config.bootnodes {
-                if let peersstate::Peer::Unknown(entry) = peerset.data.peer(set, &peer_id) {
+            for peer_id in set_config.boot_nodes {
+                if let Peer::Unknown(entry) = peerset.data.peer(set, &peer_id) {
                     entry.discover();
                 } else {
                     debug!(target: "peerset", "Duplicate boot node in config: {:?}", peer_id);
@@ -209,14 +215,6 @@ impl Peerset {
         }
 
         (peerset, handle)
-    }
-
-    pub fn state(&self) -> &state::PeersState {
-        &self.data
-    }
-
-    pub fn state_mut(&mut self) -> &mut state::PeersState {
-        &mut self.data
     }
 
     /// Returns copy of the peerset handle.
@@ -232,6 +230,22 @@ impl Peerset {
         if let Peer::Unknown(entry) = self.data.peer(set_id.into(), &peer_id) {
             entry.discover();
         }
+    }
+
+    pub fn incoming_connection(&mut self, set_id: SetId, peer_id: &PeerId) {
+        match self.data.peer(set_id.into(), &peer_id) {
+            Peer::NotConnected(peer) => peer.try_accept_peer(),
+            Peer::Connected(_) => {}
+            Peer::Unknown(_) => {}
+        };
+    }
+
+    pub fn closed_connection(&mut self, set_id: SetId, peer_id: &PeerId) {
+        match self.data.peer(set_id.into(), peer_id) {
+            Peer::Connected(peer) => peer.disconnect(),
+            Peer::NotConnected(_) => {}
+            Peer::Unknown(_) => {}
+        };
     }
 
     fn on_remove_from_peers_set(&mut self, set_id: SetId, peer_id: PeerId) {
@@ -255,26 +269,55 @@ impl Peerset {
         pending_result: oneshot::Sender<u16>,
     ) {
         let set_id = match self.data.sessions.get(&session_id) {
-            Some(set_id) => set_id,
+            Some(set_id) => *set_id,
             None => {
                 drop(pending_result);
                 return;
             }
         };
 
-        if let Some(index) = self.data.index_of(peer_id) {
+        if let Some(index) = self.data.index_of(set_id, peer_id) {
             let _ = pending_result.send(index as u16);
         } else {
             drop(pending_result)
         }
     }
 
-    fn get_peer_id(&mut self, index: u16, pending_result: oneshot::Sender<PeerId>) {
-        if let Some(peer) = self.data.at_index(index as usize) {
+    fn get_peer_id(
+        &mut self,
+        session_id: SessionId,
+        index: u16,
+        pending_result: oneshot::Sender<PeerId>,
+    ) {
+        let set_id = match self.data.sessions.get(&session_id) {
+            Some(set_id) => *set_id,
+            None => {
+                drop(pending_result);
+                return;
+            }
+        };
+
+        if let Some(peer) = self.data.at_index(set_id, index as usize) {
             let _ = pending_result.send(peer);
         } else {
             drop(pending_result)
         }
+    }
+
+    fn get_peer_ids(
+        &mut self,
+        session_id: SessionId,
+        pending_result: oneshot::Sender<Vec<PeerId>>,
+    ) {
+        let set_id = match self.data.sessions.get(&session_id) {
+            Some(set_id) => *set_id,
+            None => {
+                drop(pending_result);
+                return;
+            }
+        };
+
+        let _ = pending_result.send(self.data.peer_ids(set_id));
     }
 
     fn register_session(
@@ -291,7 +334,10 @@ impl Peerset {
             _ => {}
         };
 
+        let peers = self.data.peer_ids(set_id.into());
+
         self.message_queue.push_back(Message::GatherSet {
+            protocol_id,
             session_id,
             target_size,
             on_ready,
@@ -328,10 +374,10 @@ impl Stream for Peerset {
                     self.get_peer_index(session_id, peer_id, pending_result)
                 }
                 Action::GetPeerAtIndex(session_id, index, pending_result) => {
-                    self.get_peer_id(index, pending_result)
+                    self.get_peer_id(session_id, index, pending_result)
                 }
                 Action::GetPeerIds(session_id, pending_result) => {
-                    pending_result.send(self.data.peer_ids().collect());
+                    self.get_peer_ids(session_id, pending_result)
                 }
                 Action::RegisterSession(session_id, set_id, target_size, on_ready) => {
                     self.register_session(session_id, set_id, target_size, on_ready)

@@ -768,7 +768,7 @@ impl NetworkBehaviour for GenericBroadcast {
                                 Instant::now(),
                             );
 
-                            let get_peer_index = self.peerset.clone().peer_index(peer.clone());
+                            let get_peer_index = self.peerset.clone().index_of_peer(peer.clone());
                             let get_peer_index = Box::pin(get_peer_index);
 
                             // Save the Future-like state with params to poll `get_peer_index`

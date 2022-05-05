@@ -97,16 +97,6 @@ impl NetworkWorker {
         };
 
         let behaviour = {
-            let mut broadcast_protocols = params.broadcast_protocols;
-            broadcast_protocols.push(ProtocolConfig {
-                name: Default::default(),
-                max_request_size: 0,
-                max_response_size: 0,
-                request_timeout: Default::default(),
-
-                inbound_queue: None,
-            });
-
             match Behaviour::new(&keypair, &params, peerset) {
                 Ok(b) => b,
                 Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
@@ -149,6 +139,10 @@ impl NetworkWorker {
         let mut swarm_stream = self.swarm.fuse();
         let mut network_stream = self.from_service.fuse();
 
+        let behaviour = swarm_stream.get_mut().behaviour_mut();
+
+        behaviour.peer_at_index()
+
         loop {
             select! {
                 swarm_event = swarm_stream.next() => match swarm_event {
@@ -158,7 +152,9 @@ impl NetworkWorker {
                             info!("Inbound message from {:?} related to {:?} protocol", peer, protocol);
                         },
                         SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {:?}", address),
-                        SwarmEvent::ConnectionEstablished { peer_id, .. } => { },
+                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+
+                        },
                         SwarmEvent::ConnectionClosed { peer_id, .. } => { }
                         _ => continue
                     }
@@ -262,21 +258,5 @@ impl NetworkService {
 
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id.clone()
-    }
-
-    pub async fn local_peer_index(&self) -> u16 {
-        self.peerset
-            .clone()
-            .peer_index(self.local_peer_id())
-            .await
-            .expect("failed determining local peer index")
-    }
-
-    pub async fn get_peers(&self) -> impl ExactSizeIterator<Item = PeerId> {
-        self.peerset
-            .clone()
-            .peer_ids()
-            .await
-            .expect("failed getting peers")
     }
 }

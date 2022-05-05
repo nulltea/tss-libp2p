@@ -8,7 +8,7 @@ use jsonrpc_derive::rpc;
 #[rpc]
 pub trait JsonRPCHandler {
     #[rpc(name = "keygen")]
-    fn keygen(&self, t: u16) -> BoxFuture<RpcResult<Point<Secp256k1>>>;
+    fn keygen(&self, n: u16, t: u16) -> BoxFuture<RpcResult<Point<Secp256k1>>>;
 
     #[rpc(name = "sign")]
     fn sign(&self, msg: Vec<u8>) -> BoxFuture<RpcResult<()>>;

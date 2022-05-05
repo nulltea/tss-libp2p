@@ -10,7 +10,7 @@ use futures_util::{future, pin_mut, select, FutureExt, SinkExt};
 use log::{error, info};
 use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
 use mpc_p2p::{broadcast, NetworkService};
-use mpc_peerset::{PeersetConfig, PeersetHandle};
+use mpc_peerset::{PeersetConfig, PeersetHandle, SetSize};
 use round_based::{AsyncProtocol, Msg, StateMachine};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -29,7 +29,7 @@ use crate::traits::ComputeAgent;
 use crate::{Error, ProtocolAgent};
 
 pub enum RuntimeMessage {
-    JoinComputation(u64, ProtocolAgent),
+    JoinComputation(u16, ProtocolAgent),
 }
 
 #[derive(Clone)]
@@ -38,9 +38,9 @@ pub struct RuntimeService {
 }
 
 impl RuntimeService {
-    pub async fn join_computation(&mut self, session_id: u64, agent: ProtocolAgent) {
+    pub async fn join_computation(&mut self, n: u16, agent: ProtocolAgent) {
         self.to_runtime
-            .send(RuntimeMessage::JoinComputation(session_id, agent))
+            .send(RuntimeMessage::JoinComputation(n, agent))
             .await;
     }
 }
@@ -86,25 +86,22 @@ impl RuntimeDaemon {
             let self_ref = service_messages.get_ref();
             select! {
                 srv_msg = service_messages.select_next_some() => {
-                    let self_ref = service_messages.get_ref();
-                    let i = self_ref.network_service.local_peer_index().await;
-                    let n = self_ref.network_service.get_peers().await.len();
+                    let daemon = service_messages.get_ref();
 
                     match srv_msg {
-                        RuntimeMessage::JoinComputation(session_id, pa) => match pa {
+                        RuntimeMessage::JoinComputation(n, pa) => match pa {
                             ProtocolAgent::Keygen(agent) => {
                                 let (proxy_tx, net_rx) = mpsc::channel(n - 1);
-                                match self_ref.proxy_incoming_messages(agent.protocol_id(), proxy_tx) {
+                                match daemon.proxy_incoming_messages(agent.protocol_id(), proxy_tx) {
                                     Ok(fut) => {
                                         network_proxies.push(fut);
                                         let (mut echo, echo_tx) = EchoGadget::new(n);
                                         protocol_executions.push(echo.wrap_execution(
                                             join_computation(
-                                                i,
                                                 n as u16,
-                                                self_ref.network_service.clone(),
-                                                session_id,
                                                 agent,
+                                                daemon.peerset.clone(),
+                                                daemon.network_service.clone(),
                                                 net_rx,
                                                 echo_tx,
                                             ),
@@ -149,7 +146,6 @@ impl RuntimeDaemon {
         let mut protocol_receivers = self.protocol_receivers.write().unwrap();
 
         // Mechanism bellow borrows protocol_receiver from hash_map for computation.
-        // todo: it should return it after computation is completed.
         // For protocols where concurrency is allowed (e.g. signing), 1-m receivers router is needed.
         let mut incoming_receiver = {
             match protocol_receivers.entry(protocol_id.clone()) {
@@ -168,47 +164,11 @@ impl RuntimeDaemon {
     }
 }
 
-struct ReceiverProxy<T> {
-    pid: Cow<'static, str>,
-    rx: Option<mpsc::Receiver<T>>,
-    tx: mpsc::Sender<T>,
-}
-
-impl<T> Future for ReceiverProxy<T> {
-    type Output = (Cow<'static, str>, mpsc::Receiver<T>);
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.tx.is_closed() {
-            return Poll::Ready((self.pid.clone(), self.rx.take().unwrap()));
-        }
-
-        match self.rx.as_mut().unwrap().try_next() {
-            Ok(Some(msg)) => {
-                self.tx.try_send(msg);
-            }
-            _ => {}
-        }
-
-        // Wake this task to be polled again.
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
-
-impl Stream for RuntimeDaemon {
-    type Item = RuntimeMessage;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.from_service.poll_next_unpin(cx)
-    }
-}
-
 async fn join_computation<CA: ?Sized>(
-    i: u16,
     n: u16,
-    network_service: NetworkService,
-    session_id: u64,
     mut agent: Box<CA>,
+    peerset: PeersetHandle,
+    network_service: NetworkService,
     net_rx: mpsc::Receiver<IncomingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
 ) where
@@ -218,13 +178,23 @@ async fn join_computation<CA: ?Sized>(
     <<CA as ComputeAgent>::StateMachine as StateMachine>::MessageBody:
         Serialize + DeserializeOwned + Debug,
 {
+    let session_id = agent.session_id();
     let protocol_id = agent.protocol_id();
+    peerset
+        .register_session(session_id, 0.into(), SetSize::Exact(n as usize))
+        .await;
+
+    let i = peerset
+        .index_of_peer(session_id, network_service.local_peer_id())
+        .await
+        .unwrap();
+
     let state_machine = agent.construct_state(i + 1, n);
     let (incoming, outgoing) = state_replication(
         i,
         n,
         network_service,
-        session_id,
+        session_id.into(),
         protocol_id,
         net_rx,
         echo_tx,
@@ -355,4 +325,39 @@ where
     );
 
     (incoming, outgoing)
+}
+
+struct ReceiverProxy<T> {
+    pid: Cow<'static, str>,
+    rx: Option<mpsc::Receiver<T>>,
+    tx: mpsc::Sender<T>,
+}
+
+impl<T> Future for ReceiverProxy<T> {
+    type Output = (Cow<'static, str>, mpsc::Receiver<T>);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.tx.is_closed() {
+            return Poll::Ready((self.pid.clone(), self.rx.take().unwrap()));
+        }
+
+        match self.rx.as_mut().unwrap().try_next() {
+            Ok(Some(msg)) => {
+                self.tx.try_send(msg);
+            }
+            _ => {}
+        }
+
+        // Wake this task to be polled again.
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+impl Stream for RuntimeDaemon {
+    type Item = RuntimeMessage;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.from_service.poll_next_unpin(cx)
+    }
 }

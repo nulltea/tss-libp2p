@@ -18,9 +18,10 @@ use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
 use libp2p::NetworkBehaviour;
 use libp2p::PeerId;
 use log::{debug, error, trace, warn};
-use mpc_peerset::Peerset;
+use mpc_peerset::{Message, Peerset, SessionId};
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -42,8 +43,8 @@ pub(crate) struct Behaviour {
     peerset: Peerset,
     #[behaviour(ignore)]
     peers: HashMap<PeerId, PeerState>,
-    #[behaviour(ignore)]
-    sessions: HashMap<u64, SessionState>,
+    // #[behaviour(ignore)]
+    // sessions: HashMap<SessionId, SessionState>,
 }
 
 pub(crate) enum BehaviourOut {
@@ -120,10 +121,6 @@ impl Behaviour {
         );
     }
 
-    pub fn peer_at_index(&self, index: usize) -> Option<PeerId> {
-        self.peerset.state().at_index(index)
-    }
-
     /// Bootstrap Kademlia network.
     pub fn bootstrap(&mut self) -> Result<QueryId, String> {
         self.discovery.bootstrap()
@@ -138,28 +135,6 @@ impl Behaviour {
     {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
-        }
-
-        loop {
-            match futures::Stream::poll_next(Pin::new(&mut self.peerset), cx) {
-                Poll::Ready(Some(mpc_peerset::Message::Connect(addr))) => {
-                    return Poll::Ready(NetworkBehaviourAction::DialAddress {
-                        address: addr,
-                        handler: self.broadcast.new_handler(),
-                    });
-                }
-                Poll::Ready(Some(mpc_peerset::Message::Drop(peer_id))) => {
-                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
-                        peer_id,
-                        connection: CloseConnection::All,
-                    });
-                }
-                Poll::Ready(None) => {
-                    error!(target: "sub-libp2p", "Peerset receiver stream has returned None");
-                    break;
-                }
-                Poll::Pending => break,
-            }
         }
 
         Poll::Pending

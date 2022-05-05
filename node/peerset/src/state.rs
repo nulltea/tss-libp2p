@@ -66,12 +66,10 @@ impl PeersState {
     }
 
     /// Returns an object that grants access to the state of a peer in the context of the set.
-    pub fn peer<'a>(&'a mut self, set: usize, peer_id: &'a PeerId) -> Option<Peer<'a>> {
-        if self.sets.len() >= set {
-            return None;
-        }
+    pub fn peer<'a>(&'a mut self, set: usize, peer_id: &'a PeerId) -> Peer<'a> {
+        assert!(self.sets.len() >= set);
 
-        Some(match self.nodes.get(peer_id).map(|n| *n.sets[set]) {
+        match self.nodes.get(peer_id).map(|n| *n.sets[set]) {
             None | Some(MembershipState::NotMember) => Peer::Unknown(UnknownPeer {
                 set,
                 parent: self,
@@ -87,11 +85,13 @@ impl PeersState {
                 state: self,
                 peer_id: Cow::Borrowed(peer_id),
             }),
-        })
+        }
     }
 
     /// Returns the list of all the peers we know of.
     pub fn peer_ids(&self, set: usize) -> impl Iterator<Item = PeerId> {
+        assert!(self.sets.len() >= set);
+
         self.nodes
             .iter()
             .filter(move |(_, n)| n.sets[set].is_member())
@@ -100,6 +100,8 @@ impl PeersState {
 
     /// Returns the index of a specified peer in a given set.
     pub fn index_of(&self, set: usize, peer: PeerId) -> Option<usize> {
+        assert!(self.sets.len() >= set);
+
         self.nodes
             .iter()
             .filter(move |(_, n)| n.sets[set].is_member())
@@ -109,6 +111,8 @@ impl PeersState {
 
     /// Returns the index of a specified peer in a given set.
     pub fn at_index(&self, set: usize, index: usize) -> Option<PeerId> {
+        assert!(self.sets.len() >= set);
+
         self.nodes
             .iter()
             .filter(move |(_, n)| n.sets[set].is_member())
@@ -119,32 +123,25 @@ impl PeersState {
     }
 
     /// Returns the list of peers we are connected to in the context of the set.
-    pub fn connected_peers(&self, set: usize) -> Option<impl Iterator<Item = &PeerId>> {
-        if self.sets.len() >= set {
-            return None;
-        }
+    pub fn connected_peers(&self, set: usize) -> impl Iterator<Item = &PeerId> {
+        assert!(self.sets.len() >= set);
 
-        Some(
-            self.nodes
-                .iter()
-                .filter(move |(p, n)| n.sets[set].is_connected())
-                .map(|(p, _)| p),
-        )
+
+        self.nodes
+            .iter()
+            .filter(move |(p, n)| n.sets[set].is_connected())
+            .map(|(p, _)| p)
     }
 
     /// Returns peer's membership state in the set.
     pub fn peer_membership(&self, peer_id: &PeerId, set: usize) -> Option<MembershipState> {
-        if !self.sets.contains_key(&session_id) {
-            return None;
-        }
+        assert!(self.sets.len() >= set);
 
-        Some(
-            self.nodes
-                .iter()
-                .find(move |(p, _)| p.to_bytes() == peer_id.to_bytes())
-                .map(|(_, s)| *s.sets[set])
-                .unwrap_or(MembershipState::NotMember),
-        )
+        self.nodes
+            .iter()
+            .find(move |(p, _)| p.to_bytes() == peer_id.to_bytes())
+            .map(|(_, s)| *s.sets[set])
+            .unwrap_or(MembershipState::NotMember),
     }
 }
 
@@ -156,20 +153,6 @@ pub(crate) struct Node {
 }
 
 impl Node {
-    pub(crate) fn new(num_sets: usize) -> Self {
-        Self {
-            sets: (0..num_sets).map(|_| MembershipState::NotMember).collect(),
-        }
-    }
-}
-
-/// State of a single node that we know about.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Session {
-    pub(crate) set: usize,
-}
-
-impl Session {
     pub(crate) fn new(num_sets: usize) -> Self {
         Self {
             sets: (0..num_sets).map(|_| MembershipState::NotMember).collect(),

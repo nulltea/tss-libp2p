@@ -51,7 +51,11 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         .unwrap()
         .clone();
 
-    let boot_peers = config.parties.clone().into_iter().map(|p| p.network_peer);
+    let bootstrap_peers: Vec<_> = config
+        .parties
+        .iter()
+        .map(|p| p.network_peer.clone())
+        .collect();
 
     let (peerset, peerset_handle) = {
         Peerset::from_config(PeersetConfig {
@@ -70,7 +74,7 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
     let (net_worker, net_service) = {
         let network_config = NetworkConfig {
             listen_address: local_party.network_peer.multiaddr.clone(),
-            bootstrap_peers: boot_peers,
+            bootstrap_peers,
             mdns: args.mdns,
             kademlia: args.kademlia,
         };
