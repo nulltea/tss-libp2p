@@ -1,5 +1,8 @@
+use crate::broadcast::{Broadcast, IncomingMessage, ProtocolConfig};
+use crate::RoomConfig;
+use futures::channel::mpsc;
 use futures::{AsyncRead, AsyncWrite};
-use futures_util::{AsyncReadExt, AsyncWriteExt};
+use futures_util::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use libp2p::core::connection::{ConnectionId, ListenerId};
 use libp2p::core::ConnectedPoint;
 use libp2p::request_response::handler::{RequestResponseHandler, ResponseProtocol};
@@ -27,52 +30,41 @@ use std::{io, iter};
 
 /// Implementation of `NetworkBehaviour` that coordinates the nodes on the network.
 pub struct CoordinationBehaviour {
-    rooms: HashMap<Cow<'static, str>, (SetId, RequestResponse<CoordCodec>)>,
+    rooms: Vec<(RoomConfig, mpsc::Receiver<IncomingMessage>)>,
+    broadcast: Broadcast,
     peerset: Peerset,
 }
 
 impl CoordinationBehaviour {
-    pub fn new(rooms: impl Iterator<Item = crate::RoomConfig>, peerset: Peerset) -> Self {
-        let mut cfg = RequestResponseConfig::default();
-        cfg.set_connection_keep_alive(Duration::from_secs(20));
+    pub fn new(room_configs: impl Iterator<Item = crate::RoomConfig>, peerset: Peerset) -> Self {
+        let mut broadcast_protocols = vec![];
 
-        let rooms: HashMap<_, _> = rooms
-            .map(|rc| {
-                (
-                    Cow::Owned(rc.name.to_owned()),
-                    (
-                        SetId::from(rc.set),
-                        RequestResponse::new(
-                            CoordCodec,
-                            iter::once((
-                                format!("/rooms/0.1.0/{}", rc.name).as_bytes().to_vec(),
-                                ProtocolSupport::Full,
-                            )),
-                            cfg.clone(),
-                        ),
-                    ),
-                )
-            })
-            .collect();
+        let mut rooms = vec![];
 
-        CoordinationBehaviour { rooms, peerset }
+        for rc in room_configs {
+            let (proto_cfg, rx) =
+                ProtocolConfig::new_with_receiver(Cow::Owned(rc.name.to_owned()), rc.target_size);
+
+            broadcast_protocols.push(proto_cfg);
+            rooms.push((rc, rx));
+        }
+
+        let broadcast = Broadcast::new(broadcast_protocols, peerset.get_handle()).unwrap();
+
+        CoordinationBehaviour {
+            rooms,
+            broadcast,
+            peerset,
+        }
     }
 }
 
 impl NetworkBehaviour for CoordinationBehaviour {
-    type ProtocolsHandler = MultiHandler<
-        Cow<'static, str>,
-        <RequestResponse<CoordCodec> as NetworkBehaviour>::ProtocolsHandler,
-    >;
+    type ProtocolsHandler = <Broadcast as NetworkBehaviour>::ProtocolsHandler;
     type OutEvent = ();
 
     fn new_handler(&mut self) -> Self::ProtocolsHandler {
-        let iter = self
-            .rooms
-            .iter_mut()
-            .map(|(room, r)| (room, NetworkBehaviour::new_handler(r)));
-
-        MultiHandler::try_from_iter(iter).unwrap()
+        self.broadcast.new_handler()
     }
 
     fn addresses_of_peer(&mut self, _: &PeerId) -> Vec<Multiaddr> {
@@ -80,15 +72,11 @@ impl NetworkBehaviour for CoordinationBehaviour {
     }
 
     fn inject_connected(&mut self, peer_id: &PeerId) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_connected(peer_id);
-        }
+        self.broadcast.inject_connected(peer_id);
     }
 
     fn inject_disconnected(&mut self, peer_id: &PeerId) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_disconnected(peer_id);
-        }
+        self.broadcast.inject_disconnected(peer_id);
     }
 
     fn inject_connection_established(
@@ -98,9 +86,11 @@ impl NetworkBehaviour for CoordinationBehaviour {
         endpoint: &ConnectedPoint,
         failed_addresses: Option<&Vec<Multiaddr>>,
     ) {
-        for (set_id, p) in self.rooms.values_mut() {
-            p.inject_connection_established(peer_id, conn, endpoint, failed_addresses);
-            self.peerset.incoming_connection(set_id.clone(), peer_id);
+        self.broadcast
+            .inject_connection_established(peer_id, conn, endpoint, failed_addresses);
+
+        for room in self.rooms.iter() {
+            self.peerset.incoming_connection(room.set.into(), peer_id);
         }
     }
 
@@ -111,9 +101,15 @@ impl NetworkBehaviour for CoordinationBehaviour {
         endpoint: &ConnectedPoint,
         _: <Self::ProtocolsHandler as IntoProtocolsHandler>::Handler,
     ) {
-        for (set_id, p) in self.rooms.values_mut() {
-            p.inject_connection_closed(peer_id, conn, endpoint, p.new_handler());
-            self.peerset.closed_connection(set_id.clone(), peer_id);
+        self.broadcast.inject_connection_closed(
+            peer_id,
+            conn,
+            endpoint,
+            self.broadcast.new_handler(),
+        );
+
+        for room in self.rooms.iter() {
+            self.peerset.closed_connection(room.set.into(), peer_id);
         }
     }
 
@@ -123,12 +119,8 @@ impl NetworkBehaviour for CoordinationBehaviour {
         connection: ConnectionId,
         (room, event): <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
     ) {
-        if let Some((_, p)) = self.rooms.get_mut(room) {
-            return p.inject_event(peer_id, connection, event);
-        }
-
-        log::warn!(target: "sub-libp2p",
-            "inject_node_event: no request-response instance registered for set {i}")
+        self.broadcast
+            .inject_event(peer_id, connection, (room, event));
     }
 
     fn inject_dial_failure(
@@ -137,51 +129,36 @@ impl NetworkBehaviour for CoordinationBehaviour {
         _: Self::ProtocolsHandler,
         error: &libp2p::swarm::DialError,
     ) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_dial_failure(peer_id, p.new_handler(), error)
-        }
+        self.broadcast
+            .inject_dial_failure(peer_id, p.new_handler(), error)
     }
 
     fn inject_new_listener(&mut self, id: ListenerId) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_new_listener(id)
-        }
+        self.broadcast.inject_new_listener(id)
     }
 
     fn inject_new_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_new_listen_addr(id, addr)
-        }
+        self.broadcast.inject_new_listen_addr(id, addr)
     }
 
     fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_expired_listen_addr(id, addr)
-        }
+        self.broadcast.inject_expired_listen_addr(id, addr)
     }
 
     fn inject_listener_error(&mut self, id: ListenerId, err: &(dyn std::error::Error + 'static)) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_listener_error(id, err)
-        }
+        self.broadcast.inject_listener_error(id, err)
     }
 
     fn inject_listener_closed(&mut self, id: ListenerId, reason: Result<(), &io::Error>) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_listener_closed(id, reason)
-        }
+        self.broadcast.inject_listener_closed(id, reason)
     }
 
     fn inject_new_external_addr(&mut self, addr: &Multiaddr) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_new_external_addr(addr)
-        }
+        self.broadcast.inject_new_external_addr(addr)
     }
 
     fn inject_expired_external_addr(&mut self, addr: &Multiaddr) {
-        for (_, p) in self.rooms.values_mut() {
-            p.inject_expired_external_addr(addr)
-        }
+        self.broadcast.inject_expired_external_addr(addr)
     }
 
     fn poll(
@@ -227,134 +204,5 @@ impl NetworkBehaviour for CoordinationBehaviour {
         }
 
         Poll::Pending
-    }
-}
-
-struct CoordCodec;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum ElectionMessage {
-    Propose,
-    Aye,
-    Nae,
-}
-
-#[async_trait::async_trait]
-impl RequestResponseCodec for CoordCodec {
-    type Protocol = Vec<u8>;
-    type Request = ElectionMessage;
-    type Response = ElectionMessage;
-
-    async fn read_request<T>(
-        &mut self,
-        _: &Self::Protocol,
-        mut io: &mut T,
-    ) -> io::Result<Self::Request>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        let length = unsigned_varint::aio::read_usize(&mut io)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-        if length > 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Request size exceeds limit: {} > {}", length, 1024),
-            ));
-        }
-
-        // Read the payload.
-        let mut buffer = vec![0; length];
-        io.read_exact(&mut buffer).await?;
-
-        serde_ipld_dagcbor::from_slice(&*buffer)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-    }
-
-    async fn read_response<T>(
-        &mut self,
-        _: &Self::Protocol,
-        mut io: &mut T,
-    ) -> io::Result<Self::Response>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        // Read the length.
-        let length = unsigned_varint::aio::read_usize(&mut io)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-        if length > 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Response size exceeds limit: {} > {}", length, 1024),
-            ));
-        }
-
-        // Read the payload.
-        let mut buffer = vec![0; length];
-        io.read_exact(&mut buffer).await?;
-
-        serde_ipld_dagcbor::from_slice(&*buffer)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-    }
-
-    async fn write_request<T>(
-        &mut self,
-        _: &Self::Protocol,
-        io: &mut T,
-        req: Self::Request,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        // Write the length.
-        {
-            let mut buffer = unsigned_varint::encode::usize_buffer();
-            io.write_all(unsigned_varint::encode::usize(
-                req.payload.len(),
-                &mut buffer,
-            ))
-            .await?;
-        }
-
-        let bytes = serde_ipld_dagcbor::to_vec(&req)
-            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
-
-        // Write the payload.
-        io.write_all(&bytes).await?;
-        io.close().await?;
-
-        Ok(())
-    }
-
-    async fn write_response<T>(
-        &mut self,
-        _: &Self::Protocol,
-        io: &mut T,
-        res: Self::Response,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        // Write the length.
-        {
-            let mut buffer = unsigned_varint::encode::usize_buffer();
-            io.write_all(unsigned_varint::encode::usize(
-                req.payload.len(),
-                &mut buffer,
-            ))
-            .await?;
-        }
-
-        let bytes = serde_ipld_dagcbor::to_vec(&res)
-            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
-
-        // Write the payload.
-        io.write_all(&bytes).await?;
-        io.close().await?;
-
-        Ok(())
     }
 }

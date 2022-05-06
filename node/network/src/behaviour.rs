@@ -35,7 +35,7 @@ pub(crate) struct Behaviour {
     identify: Identify,
     discovery: DiscoveryBehaviour,
     /// Handles multiple communication of multiple generic protocols.
-    broadcast: broadcast::GenericBroadcast,
+    broadcast: broadcast::Broadcast,
 
     #[behaviour(ignore)]
     events: VecDeque<BehaviourOut>,
@@ -69,7 +69,7 @@ impl Behaviour {
         }
 
         Ok(Behaviour {
-            broadcast: broadcast::GenericBroadcast::new(
+            broadcast: broadcast::Broadcast::new(
                 params.broadcast_protocols.into_iter(),
                 peerset.get_handle(),
             )?,

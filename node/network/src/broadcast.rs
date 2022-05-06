@@ -47,7 +47,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::broadcast::generic_codec::{GenericCodec, WireMessage};
+use crate::messages::{GenericCodec, WireMessage};
+use libp2p::request_response::RequestResponseCodec;
 pub use libp2p::request_response::{InboundFailure, OutboundFailure, RequestId};
 use log::error;
 use mpc_peerset::PeersetHandle;
@@ -240,8 +241,8 @@ struct RequestProcessingOutcome {
     response: OutgoingResponse,
 }
 
-/// Implementation of `NetworkBehaviour` that provides support for request-response protocols.
-pub struct GenericBroadcast {
+/// Implementation of `NetworkBehaviour` that provides support for broadcast protocols.
+pub struct Broadcast {
     /// The multiple sub-protocols, by name.
     /// Contains the underlying libp2p `RequestResponse` behaviour, plus an optional
     /// "response builder" used to build responses for incoming requests.
@@ -278,7 +279,7 @@ pub struct GenericBroadcast {
     message_wip: Option<BroadcastMessage>,
 }
 
-impl GenericBroadcast {
+impl Broadcast {
     /// Creates a new behaviour. Must be passed a list of supported protocols. Returns an error if
     /// the same protocol is passed twice.
     pub fn new(
@@ -426,7 +427,7 @@ impl GenericBroadcast {
         &mut self,
         protocol: String,
         handler: RequestResponseHandler<GenericCodec>,
-    ) -> <GenericBroadcast as NetworkBehaviour>::ProtocolsHandler {
+    ) -> <Broadcast as NetworkBehaviour>::ProtocolsHandler {
         let mut handlers: HashMap<_, _> = self
             .protocols
             .iter_mut()
@@ -444,7 +445,7 @@ impl GenericBroadcast {
     }
 }
 
-impl NetworkBehaviour for GenericBroadcast {
+impl NetworkBehaviour for Broadcast {
     type ProtocolsHandler =
         MultiHandler<String, <RequestResponse<GenericCodec> as NetworkBehaviour>::ProtocolsHandler>;
     type OutEvent = BroadcastOut;
@@ -767,7 +768,10 @@ impl NetworkBehaviour for GenericBroadcast {
                                 Instant::now(),
                             );
 
-                            let get_peer_index = self.peerset.clone().index_of_peer(peer.clone());
+                            let get_peer_index = self
+                                .peerset
+                                .clone()
+                                .index_of_peer(request.context.session_id.into(), peer.clone());
                             let get_peer_index = Box::pin(get_peer_index);
 
                             // Save the Future-like state with params to poll `get_peer_index`

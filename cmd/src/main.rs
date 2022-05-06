@@ -77,6 +77,7 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
             rooms: vec![RoomConfig {
                 name: "tss/0".to_string(),
                 set: 0,
+                target_size: config.parties.len(),
                 boot_peers,
             }],
             mdns: args.mdns,

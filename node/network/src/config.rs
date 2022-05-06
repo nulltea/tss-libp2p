@@ -33,6 +33,8 @@ pub struct RoomConfig {
 
     pub set: usize,
 
+    pub target_size: usize,
+
     /// Configuration for the default set of nodes that participate in computation.
     pub boot_peers: Vec<MultiaddrWithPeerId>,
 }

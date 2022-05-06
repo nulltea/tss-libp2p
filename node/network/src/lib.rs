@@ -1,9 +1,12 @@
+#![feature(inherent_associated_types)]
+
 mod behaviour;
 pub mod broadcast;
 mod config;
 mod coordination;
 mod discovery;
 mod error;
+mod messages;
 mod service;
 
 pub use self::config::*;
