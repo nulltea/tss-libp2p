@@ -20,12 +20,21 @@ pub struct Params {
 pub struct NetworkConfig {
     /// Multi-addresses to listen for incoming connections.
     pub listen_address: Multiaddr,
-    /// Configuration for the default set of nodes that participate in computation.
-    pub bootstrap_peers: Vec<MultiaddrWithPeerId>,
     /// Mdns discovery enabled.
     pub mdns: bool,
     /// Kademlia discovery enabled.
     pub kademlia: bool,
+    /// Rooms
+    pub rooms: Vec<RoomConfig>,
+}
+
+pub struct RoomConfig {
+    pub name: String,
+
+    pub set: usize,
+
+    /// Configuration for the default set of nodes that participate in computation.
+    pub boot_peers: Vec<MultiaddrWithPeerId>,
 }
 
 /// The configuration of a node's secret key, describing the type of key

@@ -224,6 +224,10 @@ impl Peerset {
         }
     }
 
+    pub fn num_sets(&self) -> usize {
+        self.data.sets.len()
+    }
+
     /// Adds a node to the given set. The peerset will, if possible and not already the case,
     /// try to connect to it.
     pub fn add_to_peers_set(&mut self, set_id: SetId, peer_id: PeerId) {

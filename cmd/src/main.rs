@@ -11,7 +11,7 @@ use gumdrop::Options;
 use libp2p::PeerId;
 use log::error;
 use mpc_api::RpcApi;
-use mpc_p2p::{broadcast, NetworkConfig, NetworkWorker, NodeKeyConfig, Params, Secret};
+use mpc_p2p::{broadcast, NetworkConfig, NetworkWorker, NodeKeyConfig, Params, RoomConfig, Secret};
 use mpc_peerset::{Peerset, PeersetConfig, SetConfig};
 use mpc_rpc::server::JsonRPCServer;
 use mpc_runtime::RuntimeDaemon;
@@ -51,7 +51,7 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         .unwrap()
         .clone();
 
-    let bootstrap_peers: Vec<_> = config
+    let boot_peers: Vec<_> = config
         .parties
         .iter()
         .map(|p| p.network_peer.clone())
@@ -74,7 +74,11 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
     let (net_worker, net_service) = {
         let network_config = NetworkConfig {
             listen_address: local_party.network_peer.multiaddr.clone(),
-            bootstrap_peers,
+            rooms: vec![RoomConfig {
+                name: "tss/0".to_string(),
+                set: 0,
+                boot_peers,
+            }],
             mdns: args.mdns,
             kademlia: args.kademlia,
         };

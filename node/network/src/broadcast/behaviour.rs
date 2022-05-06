@@ -519,8 +519,7 @@ impl NetworkBehaviour for GenericBroadcast {
         }
 
         log::warn!(target: "sub-libp2p",
-			"inject_node_event: no request-response instance registered for protocol {:?}",
-			p_name)
+            "inject_node_event: no request-response instance registered for protocol {:?}", p_name)
     }
 
     fn inject_dial_failure(

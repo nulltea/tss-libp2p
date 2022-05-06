@@ -60,11 +60,6 @@ impl PeersState {
         }
     }
 
-    /// Returns the number of sets.
-    pub fn num_sets(&self) -> usize {
-        self.sets.len()
-    }
-
     /// Returns an object that grants access to the state of a peer in the context of the set.
     pub fn peer<'a>(&'a mut self, set: usize, peer_id: &'a PeerId) -> Peer<'a> {
         assert!(self.sets.len() >= set);

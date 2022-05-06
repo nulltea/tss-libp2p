@@ -43,8 +43,6 @@ pub(crate) struct Behaviour {
     peerset: Peerset,
     #[behaviour(ignore)]
     peers: HashMap<PeerId, PeerState>,
-    // #[behaviour(ignore)]
-    // sessions: HashMap<SessionId, SessionState>,
 }
 
 pub(crate) enum BehaviourOut {
@@ -229,9 +227,4 @@ enum PeerState {
     },
     Dialing,
     Dropped,
-}
-
-struct SessionState {
-    protocol_id: Cow<'static, str>,
-    parties: HashSet<(PeerId, PeerState)>,
 }
