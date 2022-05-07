@@ -52,7 +52,7 @@ impl PeersState {
                 .into_iter()
                 .map(|config| SetInfo {
                     num_peers: 0,
-                    target_size: config.target_size,
+                    max_peers: config.target_size,
                     initial_nodes: config.boot_nodes.into_iter().collect(),
                 })
                 .collect(),
@@ -84,13 +84,16 @@ impl PeersState {
     }
 
     /// Returns the list of all the peers we know of.
-    pub fn peer_ids(&self, set: usize) -> impl Iterator<Item = PeerId> {
+    /// todo sample sorting
+    pub fn sample_peers(&self, set: usize) -> impl Iterator<Item = PeerId> {
         assert!(self.sets.len() >= set);
 
-        self.nodes
+        Ok(self
+            .nodes
             .iter()
             .filter(move |(_, n)| n.sets[set].is_member())
-            .map(|(p, _)| p.clone())
+            .sorted_by_key(|(p, _)| p.to_bytes())
+            .map(|(p, _)| p.clone()))
     }
 
     /// Returns the index of a specified peer in a given set.
@@ -118,9 +121,8 @@ impl PeersState {
     }
 
     /// Returns the list of peers we are connected to in the context of the set.
-    pub fn connected_peers(&self, set: usize) -> impl Iterator<Item = &PeerId> {
+    pub fn connected_peers(&self, set: usize) -> impl ExactSizeIterator<Item = &PeerId> {
         assert!(self.sets.len() >= set);
-
 
         self.nodes
             .iter()
@@ -136,7 +138,7 @@ impl PeersState {
             .iter()
             .find(move |(p, _)| p.to_bytes() == peer_id.to_bytes())
             .map(|(_, s)| *s.sets[set])
-            .unwrap_or(MembershipState::NotMember),
+            .unwrap_or(MembershipState::NotMember)
     }
 }
 

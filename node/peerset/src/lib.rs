@@ -25,10 +25,9 @@ enum Action {
     AddToPeersSet(SetId, PeerId),
     RemoveFromPeersSet(SetId, PeerId),
 
-    RegisterSession(SessionId, SetId, SetSize, oneshot::Sender<()>),
+    AllocateForSession(SessionId, SetId, mpsc::Sender<()>),
     GetPeerIndex(SessionId, PeerId, oneshot::Sender<u16>),
     GetPeerAtIndex(SessionId, u16, oneshot::Sender<PeerId>),
-    GetPeerIds(SessionId, oneshot::Sender<Vec<PeerId>>),
 }
 
 /// Shared handle to the peer set manager (PSM). Distributed around the code.
@@ -52,14 +51,22 @@ impl PeersetHandle {
             .unbounded_send(Action::RemoveFromPeersSet(set_id, peer_id));
     }
 
-    pub async fn register_session(&self, session_id: SessionId, set_id: SetId, size: SetSize) {
-        let (tx, rx) = oneshot::channel();
+    pub async fn allocate_for_session(
+        &self,
+        session_id: SessionId,
+        set_id: SetId,
+        mut target_size: u16,
+    ) {
+        let (tx, mut rx) = mpsc::channel(target_size as usize);
 
         let _ = self
             .tx
-            .unbounded_send(Action::RegisterSession(session_id, set_id, size, tx));
+            .unbounded_send(Action::AllocateForSession(session_id, set_id, tx));
 
-        rx.await;
+        while target_size != 0 {
+            let _ = rx.select_next_some().await;
+            target_size -= 1;
+        }
     }
 
     /// Returns the index of the peer.
@@ -87,18 +94,6 @@ impl PeersetHandle {
         // due to that peer not being a part of the set.
         rx.await.map_err(|_| ())
     }
-
-    /// Returns the ids of all peers in the set.
-    pub async fn peer_ids(
-        self,
-        session_id: SessionId,
-    ) -> Result<impl ExactSizeIterator<Item = PeerId>, ()> {
-        let (tx, rx) = oneshot::channel();
-
-        let _ = self.tx.unbounded_send(Action::GetPeerIds(session_id, tx));
-
-        rx.await.map_err(|_| ()).map(|r| r.into_iter())
-    }
 }
 
 /// Message that can be sent by the peer set manager (PSM).
@@ -107,19 +102,13 @@ pub enum Message {
     /// Request to open a connection to the given peer. From the point of view of the PSM, we are
     /// immediately connected.
     Connect {
-        set_id: SetId,
         peer_id: PeerId,
-        addr: Multiaddr,
+        session_id: SessionId,
+        ack: mpsc::Sender<()>,
     },
 
     /// Drop the connection to the given peer, or cancel the connection attempt after a `Connect`.
     Drop { set_id: SetId, peer_id: PeerId },
-    // GatherSet {
-    //     protocol_id: Cow<'static, str>,
-    //     session_id: SessionId,
-    //     target_size: SetSize,
-    //     on_ready: oneshot::Sender<()>,
-    // },
 }
 
 /// Configuration to pass when creating the peer set manager.
@@ -134,7 +123,7 @@ pub struct PeersetConfig {
 pub struct SetConfig {
     /// Maximum number of ingoing links to peers.
     /// Zero value means unlimited.
-    pub target_size: u32,
+    pub max_size: u32,
 
     /// List of bootstrap nodes to initialize the set with.
     ///
@@ -144,9 +133,9 @@ pub struct SetConfig {
 }
 
 impl SetConfig {
-    pub fn new(peers: impl Iterator<Item = PeerId>, target_size: u32) -> Self {
+    pub fn new(peers: impl Iterator<Item = PeerId>, max_size: u32) -> Self {
         Self {
-            target_size,
+            max_size,
             boot_nodes: peers.collect(),
         }
     }
@@ -155,11 +144,11 @@ impl SetConfig {
 /// State of a single set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SetInfo {
-    /// Number of slot-occupying nodes for which the `MembershipState` is `In`.
+    /// Number of nodes for which the `MembershipState` is `Connected` or `NotConnected`.
     pub num_peers: u32,
 
-    /// Maximum allowed number of slot-occupying nodes for which the `MembershipState` is `In`.
-    pub target_size: u32,
+    /// Maximum allowed number of slot-occupying nodes for which the `MembershipState` is `Connected`.
+    pub max_peers: u32,
 
     /// List of node identities (discovered or not) that was introduced into the set
     /// via static configuration [`SetConfig::initial_nodes`].
@@ -224,10 +213,6 @@ impl Peerset {
         }
     }
 
-    pub fn num_sets(&self) -> usize {
-        self.data.sets.len()
-    }
-
     /// Adds a node to the given set. The peerset will, if possible and not already the case,
     /// try to connect to it.
     pub fn add_to_peers_set(&mut self, set_id: SetId, peer_id: PeerId) {
@@ -263,6 +248,28 @@ impl Peerset {
                 peer.forget_peer();
             }
             Peer::Unknown(_) => {}
+        }
+    }
+
+    async fn alloc_for_session(
+        &mut self,
+        session_id: SessionId,
+        set_id: SetId,
+        pending_responses: mpsc::Sender<()>,
+    ) {
+        match self.data.sessions.entry(session_id) {
+            Entry::Vacant(e) => {
+                e.insert(set_id.into());
+            }
+            _ => {}
+        };
+
+        for peer_id in self.data.sample_peers(set_id.into()) {
+            self.message_queue.push_back(Message::Connect {
+                peer_id,
+                session_id,
+                ack: pending_responses.clone(),
+            });
         }
     }
 
@@ -308,49 +315,9 @@ impl Peerset {
         }
     }
 
-    fn get_peer_ids(
-        &mut self,
-        session_id: SessionId,
-        pending_result: oneshot::Sender<Vec<PeerId>>,
-    ) {
-        let set_id = match self.data.sessions.get(&session_id) {
-            Some(set_id) => *set_id,
-            None => {
-                drop(pending_result);
-                return;
-            }
-        };
-
-        let _ = pending_result.send(self.data.peer_ids(set_id));
-    }
-
-    fn register_session(
-        &mut self,
-        session_id: SessionId,
-        set_id: SetId,
-        target_size: SetSize,
-        on_ready: oneshot::Sender<()>,
-    ) {
-        match self.data.sessions.entry(session_id) {
-            Entry::Vacant(e) => {
-                e.insert(set_id.into());
-            }
-            _ => {}
-        };
-
-        let peers = self.data.peer_ids(set_id.into());
-
-        self.message_queue.push_back(Message::GatherSet {
-            protocol_id,
-            session_id,
-            target_size,
-            on_ready,
-        });
-    }
-
     /// Returns the number of peers that we have discovered.
-    pub fn num_discovered_peers(&self) -> usize {
-        self.data.nodes.len()
+    pub fn num_connected_peers(&self, set: usize) -> usize {
+        self.data.sets[set].num_peers as usize
     }
 }
 
@@ -380,11 +347,8 @@ impl Stream for Peerset {
                 Action::GetPeerAtIndex(session_id, index, pending_result) => {
                     self.get_peer_id(session_id, index, pending_result)
                 }
-                Action::GetPeerIds(session_id, pending_result) => {
-                    self.get_peer_ids(session_id, pending_result)
-                }
-                Action::RegisterSession(session_id, set_id, target_size, on_ready) => {
-                    self.register_session(session_id, set_id, target_size, on_ready)
+                Action::AllocateForSession(session_id, set_id, pending_responses) => {
+                    self.alloc_for_session(session_id, set_id, pending_responses)
                 }
             }
         }

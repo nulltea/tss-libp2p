@@ -42,8 +42,11 @@ impl CoordinationBehaviour {
         let mut rooms = vec![];
 
         for rc in room_configs {
-            let (proto_cfg, rx) =
-                ProtocolConfig::new_with_receiver(Cow::Owned(rc.name.to_owned()), rc.target_size);
+            let protocol_id = Cow::Owned(format!("/room/0.1.0/{}", rc.name);
+            let (proto_cfg, rx) = ProtocolConfig::new_with_receiver(
+                protocol_id,
+                rc.target_size,
+            );
 
             broadcast_protocols.push(proto_cfg);
             rooms.push((rc, rx));
@@ -180,21 +183,6 @@ impl NetworkBehaviour for CoordinationBehaviour {
                         connection: CloseConnection::All,
                     });
                 }
-                // Poll::Ready(Some(Message::GatherSet {
-                //     session_id,
-                //     protocol_id,
-                //     target_size,
-                //     on_ready,
-                // })) => match self.sessions.entry(session_id) {
-                //     Entry::Occupied(_) => {
-                //         error!("session with {session_id} already been registered");
-                //         drop(on_ready);
-                //     }
-                //     Entry::Vacant(e) => e.insert(SessionState {
-                //         protocol_id: Default::default(),
-                //         parties: Default::default(),
-                //     }),
-                // },
                 Poll::Ready(None) => {
                     error!(target: "sub-libp2p", "Peerset receiver stream has returned None");
                     break;

@@ -31,8 +31,6 @@ pub struct NetworkConfig {
 pub struct RoomConfig {
     pub name: String,
 
-    pub set: usize,
-
     pub target_size: usize,
 
     /// Configuration for the default set of nodes that participate in computation.

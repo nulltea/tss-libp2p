@@ -170,6 +170,24 @@ impl NetworkBehaviour for DiscoveryBehaviour {
         list
     }
 
+    fn inject_connected(&mut self, peer_id: &PeerId) {
+        let multiaddr = self.addresses_of_peer(peer_id);
+        self.peer_addresses.insert(*peer_id, multiaddr);
+        self.peers.insert(*peer_id);
+        self.pending_events
+            .push_back(DiscoveryOut::Connected(*peer_id));
+
+        self.kademlia.inject_connected(peer_id)
+    }
+
+    fn inject_disconnected(&mut self, peer_id: &PeerId) {
+        self.peers.remove(peer_id);
+        self.pending_events
+            .push_back(DiscoveryOut::Disconnected(*peer_id));
+
+        self.kademlia.inject_disconnected(peer_id)
+    }
+
     fn inject_connection_established(
         &mut self,
         peer_id: &PeerId,
@@ -181,16 +199,6 @@ impl NetworkBehaviour for DiscoveryBehaviour {
 
         self.kademlia
             .inject_connection_established(peer_id, conn, endpoint, failed_addresses)
-    }
-
-    fn inject_connected(&mut self, peer_id: &PeerId) {
-        let multiaddr = self.addresses_of_peer(peer_id);
-        self.peer_addresses.insert(*peer_id, multiaddr);
-        self.peers.insert(*peer_id);
-        self.pending_events
-            .push_back(DiscoveryOut::Connected(*peer_id));
-
-        self.kademlia.inject_connected(peer_id)
     }
 
     fn inject_connection_closed(
@@ -206,14 +214,6 @@ impl NetworkBehaviour for DiscoveryBehaviour {
             .inject_connection_closed(peer_id, conn, endpoint, handler)
     }
 
-    fn inject_disconnected(&mut self, peer_id: &PeerId) {
-        self.peers.remove(peer_id);
-        self.pending_events
-            .push_back(DiscoveryOut::Disconnected(*peer_id));
-
-        self.kademlia.inject_disconnected(peer_id)
-    }
-
     fn inject_event(
         &mut self,
         peer_id: PeerId,
@@ -224,14 +224,6 @@ impl NetworkBehaviour for DiscoveryBehaviour {
             return kad.inject_event(peer_id, connection, event);
         }
         error!("inject_node_event: no kademlia instance registered for protocol")
-    }
-
-    fn inject_new_external_addr(&mut self, addr: &Multiaddr) {
-        self.kademlia.inject_new_external_addr(addr)
-    }
-
-    fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
-        self.kademlia.inject_expired_listen_addr(id, addr);
     }
 
     fn inject_dial_failure(
@@ -247,12 +239,20 @@ impl NetworkBehaviour for DiscoveryBehaviour {
         self.kademlia.inject_new_listen_addr(id, addr)
     }
 
+    fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
+        self.kademlia.inject_expired_listen_addr(id, addr);
+    }
+
     fn inject_listener_error(&mut self, id: ListenerId, err: &(dyn std::error::Error + 'static)) {
         self.kademlia.inject_listener_error(id, err)
     }
 
     fn inject_listener_closed(&mut self, id: ListenerId, reason: Result<(), &io::Error>) {
         self.kademlia.inject_listener_closed(id, reason)
+    }
+
+    fn inject_new_external_addr(&mut self, addr: &Multiaddr) {
+        self.kademlia.inject_new_external_addr(addr)
     }
 
     #[allow(clippy::type_complexity)]

@@ -65,7 +65,7 @@ impl<'a> ConnectedPeer<'a> {
     pub fn disconnect(self) -> NotConnectedPeer<'a> {
         if let Some(node) = self.state.nodes.get_mut(&*self.peer_id) {
             match node.sets[self.set] {
-                MembershipState::Connected => self.state.sets[self.set].num_peers -= 1,
+                MembershipState::Connected => {}
                 MembershipState::NotMember | MembershipState::NotConnected { .. } => {
                     debug_assert!(
                         false,
@@ -104,13 +104,12 @@ impl<'a> NotConnectedPeer<'a> {
 
     /// Tries to accept the peer as an incoming connection.
     pub fn try_accept_peer(self) -> Result<ConnectedPeer<'a>, Self> {
-        if self.state.sets[self.set].num_peers >= self.state.sets[self.set].target_size {
+        if self.state.sets[self.set].num_peers >= self.state.sets[self.set].max_peers {
             return Err(self);
         }
 
         if let Some(node) = self.state.nodes.get_mut(&*self.peer_id) {
             node.sets[self.set] = MembershipState::Connected;
-            self.state.sets[self.set].num_peers += 1;
         } else {
             debug!("State inconsistency: try_accept_incoming on an unknown node");
         }
@@ -134,6 +133,7 @@ impl<'a> NotConnectedPeer<'a> {
                 .all(|set| matches!(set, MembershipState::NotMember))
             {
                 self.state.nodes.remove(&*self.peer_id);
+                self.state.sets[self.set].num_peers -= 1;
             }
         } else {
             error!(
@@ -145,7 +145,7 @@ impl<'a> NotConnectedPeer<'a> {
 
         UnknownPeer {
             set: self.set,
-            parent: self.state,
+            state: self.state,
             peer_id: self.peer_id,
         }
     }
@@ -154,16 +154,16 @@ impl<'a> NotConnectedPeer<'a> {
 /// A peer that we have never heard of or that isn't part of the set.
 pub struct UnknownPeer<'a> {
     pub(crate) set: usize,
-    pub(crate) parent: &'a mut PeersState,
+    pub(crate) state: &'a mut PeersState,
     pub(crate) peer_id: Cow<'a, PeerId>,
 }
 
 impl<'a> UnknownPeer<'a> {
     /// Inserts the peer identity in our list.
     pub fn discover(self) -> NotConnectedPeer<'a> {
-        let num_sets = self.parent.sets.len();
+        let num_sets = self.state.sets.len();
 
-        self.parent
+        self.state
             .nodes
             .entry(self.peer_id.clone().into_owned())
             .or_insert_with(|| Node::new(num_sets))
@@ -171,9 +171,11 @@ impl<'a> UnknownPeer<'a> {
             last_connected: Instant::now(),
         };
 
+        self.state.sets[self.set].num_peers += 1;
+
         NotConnectedPeer {
             set: self.set,
-            state: self.parent,
+            state: self.state,
             peer_id: self.peer_id,
         }
     }

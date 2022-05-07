@@ -15,7 +15,9 @@ use libp2p::swarm::{AddressScore, SwarmEvent};
 use libp2p::tcp::TcpConfig;
 use libp2p::{mplex, noise, Multiaddr, PeerId, Swarm, Transport};
 use log::{error, info, warn};
-use mpc_peerset::{MembershipState, Peerset, PeersetHandle};
+use mpc_peerset::{
+    MembershipState, Peerset, PeersetConfig, PeersetHandle, SessionId, SetConfig, SetId,
+};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::thread::sleep;
@@ -72,17 +74,31 @@ pub struct NetworkService {
 impl NetworkWorker {
     pub fn new(
         node_key: NodeKeyConfig,
-        peerset: Peerset,
         params: config::Params,
     ) -> Result<(NetworkWorker, NetworkService), Error> {
         let keypair = node_key.into_keypair().map_err(|e| Error::Io(e))?;
         let local_peer_id = PeerId::from(keypair.public());
-        let peerset_handle = peerset.get_handle();
         info!(
             target: "sub-libp2p",
             "🏷 Local node identity is: {}",
             local_peer_id.to_base58(),
         );
+
+        let (peerset, peerset_handle) = {
+            Peerset::from_config(PeersetConfig {
+                sets: params
+                    .network_config
+                    .rooms
+                    .iter()
+                    .map(|rc| {
+                        SetConfig::new(
+                            rc.boot_peers.iter().map(|p| p.peer_id),
+                            rc.target_size as u32,
+                        )
+                    })
+                    .collect(),
+            })
+        };
 
         let transport = {
             let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
@@ -138,10 +154,6 @@ impl NetworkWorker {
 
         let mut swarm_stream = self.swarm.fuse();
         let mut network_stream = self.from_service.fuse();
-
-        let behaviour = swarm_stream.get_mut().behaviour_mut();
-
-        behaviour.peer_at_index()
 
         loop {
             select! {
@@ -254,6 +266,24 @@ impl NetworkService {
                 message: MessageRouting::SendDirect(peer_index, payload, response_sender),
             })
             .await;
+    }
+
+    pub async fn request_computation(
+        &self,
+        session_id: SessionId,
+        set_id: SetId,
+        target_size: u16,
+    ) {
+        self.peerset
+            .allocate_for_session(session_id, set_id, target_size)
+    }
+
+    pub async fn index_in_session(
+        &self,
+        session_id: SessionId,
+        peer_id: PeerId,
+    ) -> Result<u16, ()> {
+        self.peerset.index_of_peer(session_id, peer_id)
     }
 
     pub fn local_peer_id(&self) -> PeerId {

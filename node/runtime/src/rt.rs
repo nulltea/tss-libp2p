@@ -10,7 +10,6 @@ use futures_util::{future, pin_mut, select, FutureExt, SinkExt};
 use log::{error, info};
 use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
 use mpc_p2p::{broadcast, NetworkService};
-use mpc_peerset::{PeersetConfig, PeersetHandle, SetSize};
 use round_based::{AsyncProtocol, Msg, StateMachine};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -49,14 +48,12 @@ pub struct RuntimeDaemon {
     network_service: NetworkService,
     protocol_receivers:
         RwLock<HashMap<Cow<'static, str>, mpsc::Receiver<broadcast::IncomingMessage>>>,
-    peerset: PeersetHandle,
     from_service: mpsc::Receiver<RuntimeMessage>,
 }
 
 impl RuntimeDaemon {
     pub fn new(
         network_service: NetworkService,
-        peerset: PeersetHandle,
         protocol_receivers: impl Iterator<
             Item = (
                 Cow<'static, str>,
@@ -69,7 +66,6 @@ impl RuntimeDaemon {
         let worker = Self {
             network_service,
             protocol_receivers: RwLock::new(protocol_receivers.collect()),
-            peerset,
             from_service: rx,
         };
 
@@ -100,7 +96,6 @@ impl RuntimeDaemon {
                                             join_computation(
                                                 n as u16,
                                                 agent,
-                                                daemon.peerset.clone(),
                                                 daemon.network_service.clone(),
                                                 net_rx,
                                                 echo_tx,
@@ -165,12 +160,12 @@ impl RuntimeDaemon {
 }
 
 async fn join_computation<CA: ?Sized>(
-    n: u16,
+    room_id: Cow<'static, str>,
     mut agent: Box<CA>,
-    peerset: PeersetHandle,
     network_service: NetworkService,
     net_rx: mpsc::Receiver<IncomingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
+    n: u16,
 ) where
     CA: ComputeAgent,
     CA::StateMachine: Send + 'static,
@@ -180,12 +175,12 @@ async fn join_computation<CA: ?Sized>(
 {
     let session_id = agent.session_id();
     let protocol_id = agent.protocol_id();
-    peerset
-        .register_session(session_id, 0.into(), SetSize::Exact(n as usize))
+    network_service
+        .request_computation(session_id, 0.into(), n)
         .await;
 
-    let i = peerset
-        .index_of_peer(session_id, network_service.local_peer_id())
+    let i = network_service
+        .index_in_session(session_id, network_service.local_peer_id())
         .await
         .unwrap();
 

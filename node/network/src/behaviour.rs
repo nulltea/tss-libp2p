@@ -1,6 +1,6 @@
-use crate::broadcast;
 use crate::broadcast::ProtoContext;
 use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
+use crate::{broadcast, NetworkConfig};
 use async_std::task;
 use futures::channel::mpsc;
 use libp2p::core::connection::ConnectionId;
@@ -13,7 +13,7 @@ use libp2p::kad::{
 use libp2p::mdns::{Mdns, MdnsEvent};
 use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess};
 use libp2p::swarm::toggle::Toggle;
-use libp2p::swarm::{CloseConnection, NetworkBehaviourEventProcess};
+use libp2p::swarm::{CloseConnection, DialPeerCondition, NetworkBehaviourEventProcess};
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
 use libp2p::NetworkBehaviour;
 use libp2p::PeerId;
@@ -42,7 +42,10 @@ pub(crate) struct Behaviour {
     #[behaviour(ignore)]
     peerset: Peerset,
     #[behaviour(ignore)]
-    peers: HashMap<PeerId, PeerState>,
+    rooms: Vec<(
+        Cow<'static, str>,
+        mpsc::Receiver<broadcast::IncomingMessage>,
+    )>,
 }
 
 pub(crate) enum BehaviourOut {
@@ -57,15 +60,19 @@ pub(crate) enum BehaviourOut {
 impl Behaviour {
     pub fn new(
         local_key: &Keypair,
-        params: &crate::Params,
+        config: NetworkConfig,
+        mut broadcast_protocols: Vec<broadcast::ProtocolConfig>,
         peerset: Peerset,
     ) -> Result<Behaviour, broadcast::RegisterError> {
-        let config = &params.network_config;
-        let local_peer_id = local_key.public().to_peer_id();
+        let mut rooms = vec![];
 
-        let mut peers = HashMap::default();
-        for peer in params.network_config.bootstrap_peers {
-            peers.insert(peer.peer_id, PeerState::Dialing)
+        for rc in config.rooms {
+            let protocol_id = Cow::Owned(format!("/room/0.1.0/{}", rc.name));
+            let (proto_cfg, rx) =
+                broadcast::ProtocolConfig::new_with_receiver(protocol_id.clone(), rc.target_size);
+
+            broadcast_protocols.push(proto_cfg);
+            rooms.push((protocol_id, rx));
         }
 
         Ok(Behaviour {
@@ -73,7 +80,7 @@ impl Behaviour {
                 params.broadcast_protocols.into_iter(),
                 peerset.get_handle(),
             )?,
-            discovery: DiscoveryBehaviour::new(local_key.public(), params.network_config.clone()),
+            discovery: DiscoveryBehaviour::new(local_key.public(), config.clone()),
             identify: Identify::new(IdentifyConfig::new(
                 MPC_PROTOCOL_ID.into(),
                 local_key.public(),
@@ -81,8 +88,7 @@ impl Behaviour {
             ping: Ping::default(),
             events: VecDeque::new(),
             peerset,
-            peers,
-            sessions: Default::default(),
+            rooms,
         })
     }
 
@@ -119,6 +125,17 @@ impl Behaviour {
         );
     }
 
+    fn request_computation(&mut self, session_id: SessionId, ctx: ProtoContext) {
+        self.broadcast.broadcast_message(
+            vec![], // TODO: self.peerset.state().connected_peers(),
+            protocol_id,
+            ctx,
+            message,
+            pending_response,
+            connect,
+        );
+    }
+
     /// Bootstrap Kademlia network.
     pub fn bootstrap(&mut self) -> Result<QueryId, String> {
         self.discovery.bootstrap()
@@ -133,6 +150,27 @@ impl Behaviour {
     {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
+        }
+
+        loop {
+            match futures::Stream::poll_next(Pin::new(&mut self.peerset), cx) {
+                Poll::Ready(Some(mpc_peerset::Message::Connect {
+                    peer_id,
+                    session_id,
+                    ack,
+                })) => self.request_computation(),
+                Poll::Ready(Some(mpc_peerset::Message::Drop { peer_id, .. })) => {
+                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
+                        peer_id,
+                        connection: CloseConnection::All,
+                    });
+                }
+                Poll::Ready(None) => {
+                    error!(target: "sub-libp2p", "Peerset receiver stream has returned None");
+                    break;
+                }
+                Poll::Pending => break,
+            }
         }
 
         Poll::Pending
@@ -171,8 +209,16 @@ impl NetworkBehaviourEventProcess<broadcast::BroadcastOut> for Behaviour {
 impl NetworkBehaviourEventProcess<DiscoveryOut> for Behaviour {
     fn inject_event(&mut self, event: DiscoveryOut) {
         match event {
-            DiscoveryOut::Connected(peer) => {}
-            DiscoveryOut::Disconnected(peer) => {}
+            DiscoveryOut::Connected(peer_id) => {
+                for (set, _) in self.rooms.iter().enumerate() {
+                    self.peerset.incoming_connection(set.into(), &peer_id);
+                }
+            }
+            DiscoveryOut::Disconnected(peer_id) => {
+                for room in self.rooms.iter() {
+                    self.peerset.closed_connection(set.into(), &peer_id);
+                }
+            }
         }
     }
 }
@@ -219,12 +265,4 @@ impl NetworkBehaviourEventProcess<PingEvent> for Behaviour {
             }
         }
     }
-}
-
-enum PeerState {
-    Connected {
-        connections: SmallVec<[ConnectionId; crate::MAX_CONNECTIONS_PER_PEER]>,
-    },
-    Dialing,
-    Dropped,
 }

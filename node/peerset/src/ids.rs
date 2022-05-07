@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 /// Identifier of a set in the peerset.
 ///
 /// Can be constructed using the `From<usize>` trait implementation based on the index of the set
@@ -44,9 +46,4 @@ impl From<SessionId> for u64 {
     fn from(id: SessionId) -> Self {
         id.0
     }
-}
-
-pub enum SetSize {
-    Exact(usize),
-    AtLeast(usize),
 }

@@ -57,15 +57,6 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         .map(|p| p.network_peer.clone())
         .collect();
 
-    let (peerset, peerset_handle) = {
-        Peerset::from_config(PeersetConfig {
-            sets: vec![SetConfig::new(
-                boot_peers.clone(),
-                config.parties.len() as u32,
-            )],
-        })
-    };
-
     let (keygen_config, keygen_receiver) = broadcast::ProtocolConfig::new_with_receiver(
         KEYGEN_PROTOCOL_ID.into(),
         config.parties.len() - 1,
@@ -76,7 +67,6 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
             listen_address: local_party.network_peer.multiaddr.clone(),
             rooms: vec![RoomConfig {
                 name: "tss/0".to_string(),
-                set: 0,
                 target_size: config.parties.len(),
                 boot_peers,
             }],
@@ -88,7 +78,6 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
 
         NetworkWorker::new(
             node_key,
-            peerset,
             Params {
                 network_config,
                 broadcast_protocols,
@@ -102,7 +91,6 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
 
     let (rt_worker, rt_service) = RuntimeDaemon::new(
         net_service,
-        peerset_handle,
         vec![((Cow::Borrowed(KEYGEN_PROTOCOL_ID), keygen_receiver))].into_iter(),
     );
 
