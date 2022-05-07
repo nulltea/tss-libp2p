@@ -35,7 +35,7 @@ pub enum NetworkEvent {
 pub enum NetworkMessage {
     CrossRoundExchange {
         session_id: u64,
-        protocol_id: Cow<'static, str>,
+        room_id: Cow<'static, str>,
         round_index: u16,
         message: MessageRouting,
     },
@@ -74,7 +74,7 @@ pub struct NetworkService {
 impl NetworkWorker {
     pub fn new(
         node_key: NodeKeyConfig,
-        params: config::Params,
+        params: crate::Params,
     ) -> Result<(NetworkWorker, NetworkService), Error> {
         let keypair = node_key.into_keypair().map_err(|e| Error::Io(e))?;
         let local_peer_id = PeerId::from(keypair.public());
@@ -87,7 +87,6 @@ impl NetworkWorker {
         let (peerset, peerset_handle) = {
             Peerset::from_config(PeersetConfig {
                 sets: params
-                    .network_config
                     .rooms
                     .iter()
                     .map(|rc| {
@@ -113,7 +112,7 @@ impl NetworkWorker {
         };
 
         let behaviour = {
-            match Behaviour::new(&keypair, &params, peerset) {
+            match Behaviour::new(&keypair, params.rooms, peerset) {
                 Ok(b) => b,
                 Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
                     return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
@@ -180,7 +179,7 @@ impl NetworkWorker {
                         match request {
                             NetworkMessage::CrossRoundExchange {
                                 session_id,
-                                protocol_id,
+                                room_id,
                                 round_index,
                                 message
                             } => {
@@ -193,7 +192,7 @@ impl NetworkWorker {
                                     MessageRouting::Broadcast(payload, response_sender) => {
                                         behaviour.broadcast_message(
                                             payload,
-                                            &protocol_id,
+                                            &room_id,
                                             ctx,
                                             response_sender,
                                             IfDisconnected::ImmediateError,
@@ -205,7 +204,7 @@ impl NetworkWorker {
                                             behaviour.send_message(
                                                 &receiver_peer,
                                                 payload,
-                                                &protocol_id,
+                                                &room_id,
                                                 ctx,
                                                 response_sender,
                                                 IfDisconnected::ImmediateError,
@@ -234,7 +233,7 @@ impl NetworkService {
     pub async fn broadcast_message(
         &self,
         session_id: u64,
-        protocol_id: String,
+        room_id: String,
         round_index: u16,
         payload: Vec<u8>,
         response_sender: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
@@ -242,7 +241,7 @@ impl NetworkService {
         self.to_worker
             .send(NetworkMessage::CrossRoundExchange {
                 session_id,
-                protocol_id: Cow::Owned(protocol_id),
+                room_id: Cow::Owned(room_id),
                 round_index,
                 message: MessageRouting::Broadcast(payload, response_sender),
             })
@@ -252,7 +251,7 @@ impl NetworkService {
     pub async fn send_message(
         &self,
         session_id: u64,
-        protocol_id: String,
+        room_id: String,
         round_index: u16,
         peer_index: u16,
         payload: Vec<u8>,
@@ -261,7 +260,7 @@ impl NetworkService {
         self.to_worker
             .send(NetworkMessage::CrossRoundExchange {
                 session_id,
-                protocol_id: Cow::Owned(protocol_id),
+                room_id: Cow::Owned(room_id),
                 round_index,
                 message: MessageRouting::SendDirect(peer_index, payload, response_sender),
             })
@@ -271,7 +270,7 @@ impl NetworkService {
     pub async fn request_computation(
         &self,
         session_id: SessionId,
-        set_id: SetId,
+        room_id: String,
         target_size: u16,
     ) {
         self.peerset

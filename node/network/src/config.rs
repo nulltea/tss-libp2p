@@ -8,16 +8,12 @@ use std::error::Error;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::mpsc;
 use std::{fmt, fs, io};
 use zeroize::Zeroize;
 
-pub struct Params {
-    pub network_config: NetworkConfig,
-    pub broadcast_protocols: Vec<broadcast::ProtocolConfig>,
-}
-
 #[derive(Clone)]
-pub struct NetworkConfig {
+pub struct Params {
     /// Multi-addresses to listen for incoming connections.
     pub listen_address: Multiaddr,
     /// Mdns discovery enabled.
@@ -31,10 +27,13 @@ pub struct NetworkConfig {
 pub struct RoomConfig {
     pub name: String,
 
-    pub target_size: usize,
+    pub max_size: usize,
 
     /// Configuration for the default set of nodes that participate in computation.
     pub boot_peers: Vec<MultiaddrWithPeerId>,
+
+    /// Channel on which the networking service will send incoming messages.
+    pub inbound_queue: Option<mpsc::Sender<broadcast::IncomingMessage>>,
 }
 
 /// The configuration of a node's secret key, describing the type of key

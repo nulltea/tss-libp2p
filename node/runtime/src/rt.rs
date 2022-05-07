@@ -1,3 +1,6 @@
+use crate::echo::{EchoGadget, EchoMessage, EchoResponse};
+use crate::traits::ComputeAgent;
+use crate::{Error, ProtocolAgent};
 use anyhow::anyhow;
 use async_std::prelude::Stream;
 use async_std::task;
@@ -22,10 +25,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, LockResult, Mutex, RwLock};
 use std::task::{Context, Poll};
-
-use crate::echo::{EchoGadget, EchoMessage, EchoResponse};
-use crate::traits::ComputeAgent;
-use crate::{Error, ProtocolAgent};
 
 pub enum RuntimeMessage {
     JoinComputation(u16, ProtocolAgent),
@@ -176,7 +175,7 @@ async fn join_computation<CA: ?Sized>(
     let session_id = agent.session_id();
     let protocol_id = agent.protocol_id();
     network_service
-        .request_computation(session_id, 0.into(), n)
+        .request_computation(session_id, room_id, n)
         .await;
 
     let i = network_service
@@ -210,7 +209,7 @@ fn state_replication<M>(
     n: u16,
     network_service: NetworkService,
     session_id: u64,
-    protocol_id: Cow<'static, str>,
+    room_id: Cow<'static, str>,
     net_rx: mpsc::Receiver<IncomingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
 ) -> (
@@ -264,9 +263,9 @@ where
         (
             network_service.clone(),
             echo_tx.clone(),
-            protocol_id.clone().to_string(),
+            room_id.clone().to_string(),
         ),
-        move |(network_service, mut echo_out, protocol_id), message: Msg<M>| async move {
+        move |(network_service, mut echo_out, room_id), message: Msg<M>| async move {
             info!("outgoing message to {:?}", message);
             let payload = serde_ipld_dagcbor::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
             let message_round = 1; // todo: index round somehow
@@ -277,7 +276,7 @@ where
                 network_service
                     .send_message(
                         session_id,
-                        protocol_id.clone(),
+                        room_id.clone(),
                         message_round,
                         receiver_index - 1,
                         payload,
@@ -299,7 +298,7 @@ where
                 network_service
                     .broadcast_message(
                         session_id,
-                        protocol_id.clone(),
+                        room_id.clone(),
                         message_round,
                         payload.clone(),
                         res_tx,
@@ -315,7 +314,7 @@ where
                     .await;
             }
 
-            Ok::<_, anyhow::Error>((network_service, echo_out, protocol_id))
+            Ok::<_, anyhow::Error>((network_service, echo_out, room_id))
         },
     );
 

@@ -58,7 +58,7 @@ pub struct DiscoveryBehaviour {
 }
 
 impl DiscoveryBehaviour {
-    pub fn new(local_public_key: PublicKey, config: crate::NetworkConfig) -> Self {
+    pub fn new(local_public_key: PublicKey, config: crate::Params) -> Self {
         let local_peer_id = local_public_key.to_peer_id();
         let mut peers = HashSet::new();
         let peer_addresses = HashMap::new();

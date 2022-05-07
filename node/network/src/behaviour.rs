@@ -1,6 +1,6 @@
 use crate::broadcast::ProtoContext;
 use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
-use crate::{broadcast, NetworkConfig};
+use crate::{broadcast, Params, RoomConfig};
 use async_std::task;
 use futures::channel::mpsc;
 use libp2p::core::connection::ConnectionId;
@@ -41,11 +41,6 @@ pub(crate) struct Behaviour {
     events: VecDeque<BehaviourOut>,
     #[behaviour(ignore)]
     peerset: Peerset,
-    #[behaviour(ignore)]
-    rooms: Vec<(
-        Cow<'static, str>,
-        mpsc::Receiver<broadcast::IncomingMessage>,
-    )>,
 }
 
 pub(crate) enum BehaviourOut {
@@ -53,26 +48,25 @@ pub(crate) enum BehaviourOut {
         /// Peer which sent us a message.
         peer: PeerId,
         /// Protocol name of the request.
-        protocol: Cow<'static, str>,
+        room_id: Cow<'static, str>,
     },
 }
 
 impl Behaviour {
     pub fn new(
         local_key: &Keypair,
-        config: NetworkConfig,
-        mut broadcast_protocols: Vec<broadcast::ProtocolConfig>,
+        rooms: impl Iterator<Item = RoomConfig>,
         peerset: Peerset,
     ) -> Result<Behaviour, broadcast::RegisterError> {
-        let mut rooms = vec![];
+        //let mut rooms = vec![];
+        let mut broadcast_protocols = vec![];
 
-        for rc in config.rooms {
-            let protocol_id = Cow::Owned(format!("/room/0.1.0/{}", rc.name));
+        for rc in rooms {
+            let room_id = Cow::Owned(format!("/rooms/{}", rc.name));
             let (proto_cfg, rx) =
-                broadcast::ProtocolConfig::new_with_receiver(protocol_id.clone(), rc.target_size);
+                broadcast::ProtocolConfig::new_with_receiver(room_id, rc.max_size);
 
             broadcast_protocols.push(proto_cfg);
-            rooms.push((protocol_id, rx));
         }
 
         Ok(Behaviour {
@@ -88,7 +82,6 @@ impl Behaviour {
             ping: Ping::default(),
             events: VecDeque::new(),
             peerset,
-            rooms,
         })
     }
 
@@ -97,27 +90,27 @@ impl Behaviour {
         &mut self,
         peer: &PeerId,
         message: Vec<u8>,
-        protocol_id: &str,
+        room_id: &str,
         ctx: ProtoContext,
         pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
         self.broadcast
-            .send_message(peer, protocol_id, ctx, message, pending_response, connect)
+            .send_message(peer, room_id, ctx, message, pending_response, connect)
     }
 
     /// Initiates broadcasting of a message.
     pub fn broadcast_message(
         &mut self,
         message: Vec<u8>,
-        protocol_id: &str,
+        room_id: &str,
         ctx: ProtoContext,
         pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
         self.broadcast.broadcast_message(
             vec![], // TODO: self.peerset.state().connected_peers(),
-            protocol_id,
+            room_id,
             ctx,
             message,
             pending_response,

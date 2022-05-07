@@ -3,7 +3,6 @@
 mod behaviour;
 pub mod broadcast;
 mod config;
-mod coordination;
 mod discovery;
 mod error;
 mod messages;
