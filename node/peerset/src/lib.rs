@@ -22,12 +22,12 @@ use crate::state::Node;
 
 #[derive(Debug)]
 enum Action {
-    AddToPeersSet(SetId, PeerId),
-    RemoveFromPeersSet(SetId, PeerId),
+    AddToPeersSet(RoomId, PeerId),
+    RemoveFromPeersSet(RoomId, PeerId),
 
-    AllocateForSession(SessionId, SetId, mpsc::Sender<()>),
-    GetPeerIndex(SessionId, PeerId, oneshot::Sender<u16>),
-    GetPeerAtIndex(SessionId, u16, oneshot::Sender<PeerId>),
+    AllocateForSession(RoomId, SessionId, mpsc::Sender<()>),
+    GetPeerIndex(RoomId, PeerId, oneshot::Sender<u16>),
+    GetPeerAtIndex(RoomId, u16, oneshot::Sender<PeerId>),
 }
 
 /// Shared handle to the peer set manager (PSM). Distributed around the code.
@@ -38,30 +38,30 @@ pub struct PeersetHandle {
 
 impl PeersetHandle {
     /// Add a peer to the set.
-    pub fn add_to_peers_set(&self, set_id: SetId, peer_id: PeerId) {
+    pub fn add_to_peers_set(&self, room_id: &RoomId, peer_id: PeerId) {
         let _ = self
             .tx
-            .unbounded_send(Action::AddToPeersSet(set_id, peer_id));
+            .unbounded_send(Action::AddToPeersSet(room_id.clone(), peer_id));
     }
 
     /// Remove a peer from the set.
-    pub fn remove_from_peers_set(&self, set_id: SetId, peer_id: PeerId) {
+    pub fn remove_from_peers_set(&self, room_id: &RoomId, peer_id: PeerId) {
         let _ = self
             .tx
-            .unbounded_send(Action::RemoveFromPeersSet(set_id, peer_id));
+            .unbounded_send(Action::RemoveFromPeersSet(room_id.clone(), peer_id));
     }
 
     pub async fn allocate_for_session(
         &self,
+        room_id: &RoomId,
         session_id: SessionId,
-        set_id: SetId,
         mut target_size: u16,
     ) {
         let (tx, mut rx) = mpsc::channel(target_size as usize);
 
         let _ = self
             .tx
-            .unbounded_send(Action::AllocateForSession(session_id, set_id, tx));
+            .unbounded_send(Action::AllocateForSession(room_id.clone(), session_id, tx));
 
         while target_size != 0 {
             let _ = rx.select_next_some().await;
@@ -103,12 +103,13 @@ pub enum Message {
     /// immediately connected.
     Connect {
         peer_id: PeerId,
+        room_id: RoomId,
         session_id: SessionId,
         ack: mpsc::Sender<()>,
     },
 
     /// Drop the connection to the given peer, or cancel the connection attempt after a `Connect`.
-    Drop { set_id: SetId, peer_id: PeerId },
+    Drop { room_id: RoomId, peer_id: PeerId },
 }
 
 /// Configuration to pass when creating the peer set manager.
@@ -213,35 +214,41 @@ impl Peerset {
         }
     }
 
+    pub fn connected_peers(&mut self, room_id: &RoomId) -> impl Iterator<Item = &PeerId> {
+        self.data.connected_peers(room_id)
+    }
+
     /// Adds a node to the given set. The peerset will, if possible and not already the case,
     /// try to connect to it.
-    pub fn add_to_peers_set(&mut self, set_id: SetId, peer_id: PeerId) {
-        if let Peer::Unknown(entry) = self.data.peer(set_id.into(), &peer_id) {
+    pub fn add_to_peers_set(&mut self, room_id: &RoomId, peer_id: &PeerId) {
+        if let Peer::Unknown(entry) = self.data.peer(room_id, peer_id) {
             entry.discover();
         }
     }
 
-    pub fn incoming_connection(&mut self, set_id: SetId, peer_id: &PeerId) {
-        match self.data.peer(set_id.into(), &peer_id) {
+    pub fn incoming_connection(&mut self, room_id: &RoomId, peer_id: &PeerId) {
+        match self.data.peer(room_id, peer_id) {
             Peer::NotConnected(peer) => peer.try_accept_peer(),
             Peer::Connected(_) => {}
             Peer::Unknown(_) => {}
         };
     }
 
-    pub fn closed_connection(&mut self, set_id: SetId, peer_id: &PeerId) {
-        match self.data.peer(set_id.into(), peer_id) {
+    pub fn closed_connection(&mut self, room_id: &RoomId, peer_id: &PeerId) {
+        match self.data.peer(room_id, peer_id) {
             Peer::Connected(peer) => peer.disconnect(),
             Peer::NotConnected(_) => {}
             Peer::Unknown(_) => {}
         };
     }
 
-    fn on_remove_from_peers_set(&mut self, set_id: SetId, peer_id: PeerId) {
-        match self.data.peer(set_id.into(), &peer_id) {
+    fn on_remove_from_peers_set(&mut self, room_id: &RoomId, peer_id: PeerId) {
+        match self.data.peer(room_id.into(), &peer_id) {
             Peer::Connected(peer) => {
-                self.message_queue
-                    .push_back(Message::Drop { set_id, peer_id });
+                self.message_queue.push_back(Message::Drop {
+                    room_id: room_id.clone(),
+                    peer_id: peer_id.clone(),
+                });
                 peer.disconnect().forget_peer();
             }
             Peer::NotConnected(peer) => {
@@ -253,20 +260,21 @@ impl Peerset {
 
     async fn alloc_for_session(
         &mut self,
+        room_id: &RoomId,
         session_id: SessionId,
-        set_id: SetId,
         pending_responses: mpsc::Sender<()>,
     ) {
         match self.data.sessions.entry(session_id) {
             Entry::Vacant(e) => {
-                e.insert(set_id.into());
+                e.insert(room_id.clone());
             }
             _ => {}
         };
 
-        for peer_id in self.data.sample_peers(set_id.into()) {
+        for peer_id in self.data.sample_peers(room_id) {
             self.message_queue.push_back(Message::Connect {
                 peer_id,
+                room_id: room_id.clone(),
                 session_id,
                 ack: pending_responses.clone(),
             });
@@ -317,7 +325,7 @@ impl Peerset {
 
     /// Returns the number of peers that we have discovered.
     pub fn num_connected_peers(&self, set: usize) -> usize {
-        self.data.sets[set].num_peers as usize
+        self.data.rooms[set].num_peers as usize
     }
 }
 
@@ -337,9 +345,9 @@ impl Stream for Peerset {
             };
 
             match action {
-                Action::AddToPeersSet(set_id, peer_id) => self.add_to_peers_set(set_id, peer_id),
-                Action::RemoveFromPeersSet(set_id, peer_id) => {
-                    self.on_remove_from_peers_set(set_id, peer_id)
+                Action::AddToPeersSet(room_id, peer_id) => self.add_to_peers_set(set_id, &peer_id),
+                Action::RemoveFromPeersSet(room_id, peer_id) => {
+                    self.on_remove_from_peers_set(&room_id, peer_id)
                 }
                 Action::GetPeerIndex(session_id, peer_id, pending_result) => {
                     self.get_peer_index(session_id, peer_id, pending_result)
@@ -347,8 +355,8 @@ impl Stream for Peerset {
                 Action::GetPeerAtIndex(session_id, index, pending_result) => {
                     self.get_peer_id(session_id, index, pending_result)
                 }
-                Action::AllocateForSession(session_id, set_id, pending_responses) => {
-                    self.alloc_for_session(session_id, set_id, pending_responses)
+                Action::AllocateForSession(room_id, session_id, pending_responses) => {
+                    self.alloc_for_session(&room_id, session_id, pending_responses)
                 }
             }
         }

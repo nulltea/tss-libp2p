@@ -1,3 +1,4 @@
+use crate::RoomArgs;
 use async_std::task;
 use futures::prelude::*;
 use libp2p::core::network::NetworkConfig;
@@ -18,6 +19,7 @@ use libp2p::{
 };
 use libp2p::{kad::record::store::MemoryStore, mdns::Mdns};
 use log::{debug, error, trace, warn};
+use mpc_peerset::RoomId;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::{
@@ -32,10 +34,10 @@ use std::{
 #[derive(Debug)]
 pub enum DiscoveryOut {
     /// Event that notifies that we connected to the node with the given peer id.
-    Connected(PeerId),
+    Connected(RoomId, PeerId),
 
     /// Event that notifies that we disconnected with the node with the given peer id.
-    Disconnected(PeerId),
+    Disconnected(RoomId, PeerId),
 }
 
 /// Implementation of `NetworkBehaviour` that discovers the nodes on the network.
@@ -58,7 +60,7 @@ pub struct DiscoveryBehaviour {
 }
 
 impl DiscoveryBehaviour {
-    pub fn new(local_public_key: PublicKey, config: crate::Params) -> Self {
+    pub fn new(local_public_key: PublicKey, rooms: impl Iterator<Item = RoomArgs>) -> Self {
         let local_peer_id = local_public_key.to_peer_id();
         let mut peers = HashSet::new();
         let peer_addresses = HashMap::new();

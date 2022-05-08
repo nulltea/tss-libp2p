@@ -3,6 +3,7 @@ use curv::elliptic::curves::{Point, Secp256k1};
 use futures::future::{FutureExt, TryFutureExt};
 use futures::StreamExt;
 use futures_util::SinkExt;
+use mpc_peerset::RoomId;
 use mpc_rpc::{RpcError, RpcErrorCode, RpcFuture, RpcResult};
 use mpc_tss::DKG;
 use std::fmt::{Debug, Display};
@@ -61,21 +62,25 @@ impl<T, E: Display> Future for AsyncResult<T, E> {
 }
 
 impl mpc_rpc::JsonRPCHandler for RpcApi {
-    fn keygen(&self, n: u16, t: u16) -> RpcFuture<RpcResult<Point<Secp256k1>>> {
+    fn keygen(&self, room: String, n: u16, t: u16) -> RpcFuture<RpcResult<Point<Secp256k1>>> {
         let (agent, rx) = DKG::new(t, "data/player_{}/key.share".to_string());
 
         let mut rt_service = self.rt_service.clone();
 
         task::spawn(async move {
             rt_service
-                .join_computation(n, mpc_runtime::ProtocolAgent::Keygen(Box::new(agent)))
+                .join_computation(
+                    RoomId::from(room),
+                    n,
+                    mpc_runtime::ProtocolAgent::Keygen(Box::new(agent)),
+                )
                 .await;
         });
 
         AsyncResult { rx }.boxed()
     }
 
-    fn sign(&self, _msg: Vec<u8>) -> RpcFuture<RpcResult<()>> {
+    fn sign(&self, room: String, _msg: Vec<u8>) -> RpcFuture<RpcResult<()>> {
         let (tx, rx) = oneshot::channel();
 
         tx.send(Ok::<(), anyhow::Error>(()));

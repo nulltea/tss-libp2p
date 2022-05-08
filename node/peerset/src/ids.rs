@@ -1,29 +1,21 @@
+use arrayvec::ArrayString;
 use std::cmp::Ordering;
 
-/// Identifier of a set in the peerset.
-///
-/// Can be constructed using the `From<usize>` trait implementation based on the index of the set
-/// within [`PeersetConfig::sets`]. For example, the first element of [`PeersetConfig::sets`] is
-/// later referred to with `SetId::from(0)`. It is intended that the code responsible for building
-/// the [`PeersetConfig`] is also responsible for constructing the [`SetId`]s.
+/// Identifier of a room in the peerset.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SetId(usize);
+pub struct RoomId(ArrayString<64>);
 
-impl SetId {
-    pub const fn from(id: usize) -> Self {
-        Self(id)
+impl RoomId {
+    pub const fn from(id: String) -> Self {
+        Self(blake3::hash(id.as_bytes()).to_hex())
     }
-}
 
-impl From<usize> for SetId {
-    fn from(id: usize) -> Self {
-        Self(id)
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
     }
-}
 
-impl From<SetId> for usize {
-    fn from(id: SetId) -> Self {
-        id.0
+    pub fn as_protocol_id(&self) -> &str {
+        format!("/room/{}", self.as_str()).as_str()
     }
 }
 

@@ -13,6 +13,7 @@ use futures_util::{future, pin_mut, select, FutureExt, SinkExt};
 use log::{error, info};
 use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
 use mpc_p2p::{broadcast, NetworkService};
+use mpc_peerset::RoomId;
 use round_based::{AsyncProtocol, Msg, StateMachine};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -27,7 +28,7 @@ use std::sync::{Arc, LockResult, Mutex, RwLock};
 use std::task::{Context, Poll};
 
 pub enum RuntimeMessage {
-    JoinComputation(u16, ProtocolAgent),
+    JoinComputation(RoomId, u16, ProtocolAgent),
 }
 
 #[derive(Clone)]
@@ -36,35 +37,29 @@ pub struct RuntimeService {
 }
 
 impl RuntimeService {
-    pub async fn join_computation(&mut self, n: u16, agent: ProtocolAgent) {
+    pub async fn join_computation(&mut self, room_id: RoomId, n: u16, agent: ProtocolAgent) {
         self.to_runtime
-            .send(RuntimeMessage::JoinComputation(n, agent))
+            .send(RuntimeMessage::JoinComputation(room_id, n, agent))
             .await;
     }
 }
 
 pub struct RuntimeDaemon {
     network_service: NetworkService,
-    protocol_receivers:
-        RwLock<HashMap<Cow<'static, str>, mpsc::Receiver<broadcast::IncomingMessage>>>,
+    rooms: RwLock<HashMap<RoomId, mpsc::Receiver<broadcast::IncomingMessage>>>,
     from_service: mpsc::Receiver<RuntimeMessage>,
 }
 
 impl RuntimeDaemon {
     pub fn new(
         network_service: NetworkService,
-        protocol_receivers: impl Iterator<
-            Item = (
-                Cow<'static, str>,
-                mpsc::Receiver<broadcast::IncomingMessage>,
-            ),
-        >,
+        protocol_receivers: impl Iterator<Item = (RoomId, mpsc::Receiver<broadcast::IncomingMessage>)>,
     ) -> (Self, RuntimeService) {
         let (tx, rx) = mpsc::channel(2);
 
         let worker = Self {
             network_service,
-            protocol_receivers: RwLock::new(protocol_receivers.collect()),
+            rooms: RwLock::new(protocol_receivers.collect()),
             from_service: rx,
         };
 
@@ -119,15 +114,42 @@ impl RuntimeDaemon {
                 }
             }
 
-            // if let Ok(Some(srv_msg)) = self.from_service.try_next() {
-            //
-            // }
+            if let Ok(Some(srv_msg)) = self.from_service.try_next() {
+                let daemon = service_messages.get_ref();
+
+                match srv_msg {
+                    RuntimeMessage::JoinComputation(room_id, n, pa) => match pa {
+                        ProtocolAgent::Keygen(agent) => {
+                            let (proxy_tx, net_rx) = mpsc::channel((n - 1) as usize);
+                            match daemon.proxy_incoming_messages(room_id, proxy_tx) {
+                                Ok(fut) => {
+                                    network_proxies.push(fut);
+                                    let (mut echo, echo_tx) = EchoGadget::new(n as usize);
+                                    protocol_executions.push(echo.wrap_execution(
+                                        join_computation(
+                                            room_id,
+                                            agent,
+                                            daemon.network_service.clone(),
+                                            net_rx,
+                                            echo_tx,
+                                            n,
+                                        ),
+                                    ));
+                                }
+                                Err(e) => {
+                                    agent.done(Err(anyhow!("computation failed to start: {e}")));
+                                }
+                            }
+                        }
+                    },
+                }
+            }
         }
     }
 
     fn proxy_incoming_messages(
         &self,
-        protocol_id: Cow<'static, str>,
+        room_id: RoomId,
         mut to: mpsc::Sender<IncomingMessage>,
     ) -> crate::Result<
         impl Future<
@@ -137,19 +159,19 @@ impl RuntimeDaemon {
                 ),
             > + 'static,
     > {
-        let mut protocol_receivers = self.protocol_receivers.write().unwrap();
+        let mut protocol_receivers = self.rooms.write().unwrap();
 
         // Mechanism bellow borrows protocol_receiver from hash_map for computation.
         // For protocols where concurrency is allowed (e.g. signing), 1-m receivers router is needed.
         let mut incoming_receiver = {
-            match protocol_receivers.entry(protocol_id.clone()) {
+            match protocol_receivers.entry(room_id.clone()) {
                 Entry::Occupied(e) => Ok(e.remove()),
                 Entry::Vacant(_) => Err(crate::Error::Busy),
             }
         }?;
 
         let fut = ReceiverProxy {
-            pid: protocol_id,
+            id: room_id,
             rx: Some(incoming_receiver),
             tx: to,
         };
@@ -159,7 +181,7 @@ impl RuntimeDaemon {
 }
 
 async fn join_computation<CA: ?Sized>(
-    room_id: Cow<'static, str>,
+    room_id: RoomId,
     mut agent: Box<CA>,
     network_service: NetworkService,
     net_rx: mpsc::Receiver<IncomingMessage>,
@@ -173,9 +195,8 @@ async fn join_computation<CA: ?Sized>(
         Serialize + DeserializeOwned + Debug,
 {
     let session_id = agent.session_id();
-    let protocol_id = agent.protocol_id();
     network_service
-        .request_computation(session_id, room_id, n)
+        .request_computation(&room_id, session_id, n)
         .await;
 
     let i = network_service
@@ -185,13 +206,13 @@ async fn join_computation<CA: ?Sized>(
 
     let state_machine = agent.construct_state(i + 1, n);
     let (incoming, outgoing) = state_replication(
-        i,
-        n,
+        room_id,
         network_service,
         session_id.into(),
-        protocol_id,
         net_rx,
         echo_tx,
+        i,
+        n,
     );
     let incoming = incoming.fuse();
     pin_mut!(incoming, outgoing);
@@ -205,13 +226,13 @@ async fn join_computation<CA: ?Sized>(
 }
 
 fn state_replication<M>(
-    i: u16,
-    n: u16,
+    room_id: RoomId,
     network_service: NetworkService,
     session_id: u64,
-    room_id: Cow<'static, str>,
     net_rx: mpsc::Receiver<IncomingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
+    i: u16,
+    n: u16,
 ) -> (
     impl Stream<Item = Result<Msg<M>, anyhow::Error>>,
     impl Sink<Msg<M>, Error = anyhow::Error>,
@@ -260,11 +281,7 @@ where
     });
 
     let outgoing = futures::sink::unfold(
-        (
-            network_service.clone(),
-            echo_tx.clone(),
-            room_id.clone().to_string(),
-        ),
+        (network_service.clone(), echo_tx.clone(), room_id.clone()),
         move |(network_service, mut echo_out, room_id), message: Msg<M>| async move {
             info!("outgoing message to {:?}", message);
             let payload = serde_ipld_dagcbor::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
@@ -322,17 +339,17 @@ where
 }
 
 struct ReceiverProxy<T> {
-    pid: Cow<'static, str>,
+    id: RoomId,
     rx: Option<mpsc::Receiver<T>>,
     tx: mpsc::Sender<T>,
 }
 
 impl<T> Future for ReceiverProxy<T> {
-    type Output = (Cow<'static, str>, mpsc::Receiver<T>);
+    type Output = (RoomId, mpsc::Receiver<T>);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.tx.is_closed() {
-            return Poll::Ready((self.pid.clone(), self.rx.take().unwrap()));
+            return Poll::Ready((self.id.clone(), self.rx.take().unwrap()));
         }
 
         match self.rx.as_mut().unwrap().try_next() {

@@ -37,13 +37,16 @@ pub struct DeployArgs {
 pub struct KeygenArgs {
     help: bool,
 
-    #[options(help = "json rpc addresses")]
-    pub addresses: Vec<String>,
+    #[options(help = "mpc room")]
+    pub room: String,
 
-    #[options(help = "threshold number")]
+    #[options(help = "json rpc addresses")]
+    pub address: String,
+
+    #[options(help = "threshold number (T)")]
     pub threshold: u16,
 
-    #[options(help = "number of parties in the set")]
+    #[options(help = "number of parties (N)")]
     pub number_of_parties: u16,
 }
 

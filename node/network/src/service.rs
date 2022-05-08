@@ -16,7 +16,7 @@ use libp2p::tcp::TcpConfig;
 use libp2p::{mplex, noise, Multiaddr, PeerId, Swarm, Transport};
 use log::{error, info, warn};
 use mpc_peerset::{
-    MembershipState, Peerset, PeersetConfig, PeersetHandle, SessionId, SetConfig, SetId,
+    MembershipState, Peerset, PeersetConfig, PeersetHandle, RoomId, SessionId, SetConfig,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -35,7 +35,7 @@ pub enum NetworkEvent {
 pub enum NetworkMessage {
     CrossRoundExchange {
         session_id: u64,
-        room_id: Cow<'static, str>,
+        room_id: RoomId,
         round_index: u16,
         message: MessageRouting,
     },
@@ -111,8 +111,17 @@ impl NetworkWorker {
                 .boxed()
         };
 
+        let mut broadcast_protocols = vec![];
+
+        for rc in params.rooms {
+            let protocol_id = Cow::Owned(rc.id.as_protocol_id());
+            let proto_cfg = broadcast::ProtocolConfig::new(protocol_id, rc.inbound_queue);
+
+            broadcast_protocols.push(proto_cfg);
+        }
+
         let behaviour = {
-            match Behaviour::new(&keypair, params.rooms, peerset) {
+            match Behaviour::new(&keypair, params.rooms, broadcast_protocols, peerset) {
                 Ok(b) => b,
                 Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
                     return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
@@ -192,7 +201,7 @@ impl NetworkWorker {
                                     MessageRouting::Broadcast(payload, response_sender) => {
                                         behaviour.broadcast_message(
                                             payload,
-                                            &room_id,
+                                            room_id,
                                             ctx,
                                             response_sender,
                                             IfDisconnected::ImmediateError,
@@ -204,7 +213,7 @@ impl NetworkWorker {
                                             behaviour.send_message(
                                                 &receiver_peer,
                                                 payload,
-                                                &room_id,
+                                                room_id,
                                                 ctx,
                                                 response_sender,
                                                 IfDisconnected::ImmediateError,
@@ -233,7 +242,7 @@ impl NetworkService {
     pub async fn broadcast_message(
         &self,
         session_id: u64,
-        room_id: String,
+        room_id: RoomId,
         round_index: u16,
         payload: Vec<u8>,
         response_sender: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
@@ -241,7 +250,7 @@ impl NetworkService {
         self.to_worker
             .send(NetworkMessage::CrossRoundExchange {
                 session_id,
-                room_id: Cow::Owned(room_id),
+                room_id,
                 round_index,
                 message: MessageRouting::Broadcast(payload, response_sender),
             })
@@ -251,7 +260,7 @@ impl NetworkService {
     pub async fn send_message(
         &self,
         session_id: u64,
-        room_id: String,
+        room_id: RoomId,
         round_index: u16,
         peer_index: u16,
         payload: Vec<u8>,
@@ -260,7 +269,7 @@ impl NetworkService {
         self.to_worker
             .send(NetworkMessage::CrossRoundExchange {
                 session_id,
-                room_id: Cow::Owned(room_id),
+                room_id,
                 round_index,
                 message: MessageRouting::SendDirect(peer_index, payload, response_sender),
             })
@@ -269,12 +278,12 @@ impl NetworkService {
 
     pub async fn request_computation(
         &self,
+        room_id: &RoomId,
         session_id: SessionId,
-        room_id: String,
         target_size: u16,
     ) {
         self.peerset
-            .allocate_for_session(session_id, set_id, target_size)
+            .allocate_for_session(room_id, session_id, target_size)
     }
 
     pub async fn index_in_session(

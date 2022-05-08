@@ -1,6 +1,6 @@
 use crate::broadcast::ProtoContext;
 use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
-use crate::{broadcast, Params, RoomConfig};
+use crate::{broadcast, Params, RoomArgs};
 use async_std::task;
 use futures::channel::mpsc;
 use libp2p::core::connection::ConnectionId;
@@ -18,7 +18,7 @@ use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
 use libp2p::NetworkBehaviour;
 use libp2p::PeerId;
 use log::{debug, error, trace, warn};
-use mpc_peerset::{Message, Peerset, SessionId};
+use mpc_peerset::{Message, Peerset, RoomId, SessionId};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
@@ -55,26 +55,16 @@ pub(crate) enum BehaviourOut {
 impl Behaviour {
     pub fn new(
         local_key: &Keypair,
-        rooms: impl Iterator<Item = RoomConfig>,
+        rooms: impl Iterator<Item = RoomArgs>,
+        broadcast_protocols: Vec<broadcast::ProtocolConfig>,
         peerset: Peerset,
     ) -> Result<Behaviour, broadcast::RegisterError> {
-        //let mut rooms = vec![];
-        let mut broadcast_protocols = vec![];
-
-        for rc in rooms {
-            let room_id = Cow::Owned(format!("/rooms/{}", rc.name));
-            let (proto_cfg, rx) =
-                broadcast::ProtocolConfig::new_with_receiver(room_id, rc.max_size);
-
-            broadcast_protocols.push(proto_cfg);
-        }
-
         Ok(Behaviour {
             broadcast: broadcast::Broadcast::new(
-                params.broadcast_protocols.into_iter(),
+                broadcast_protocols.into_iter(),
                 peerset.get_handle(),
             )?,
-            discovery: DiscoveryBehaviour::new(local_key.public(), config.clone()),
+            discovery: DiscoveryBehaviour::new(local_key.public(), rooms),
             identify: Identify::new(IdentifyConfig::new(
                 MPC_PROTOCOL_ID.into(),
                 local_key.public(),
@@ -90,27 +80,33 @@ impl Behaviour {
         &mut self,
         peer: &PeerId,
         message: Vec<u8>,
-        room_id: &str,
+        room_id: RoomId,
         ctx: ProtoContext,
         pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
-        self.broadcast
-            .send_message(peer, room_id, ctx, message, pending_response, connect)
+        self.broadcast.send_message(
+            peer,
+            room_id.as_protocol_id(),
+            ctx,
+            message,
+            pending_response,
+            connect,
+        )
     }
 
     /// Initiates broadcasting of a message.
     pub fn broadcast_message(
         &mut self,
         message: Vec<u8>,
-        room_id: &str,
+        room_id: RoomId,
         ctx: ProtoContext,
         pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
         self.broadcast.broadcast_message(
-            vec![], // TODO: self.peerset.state().connected_peers(),
-            room_id,
+            self.peerset.connected_peers(&room_id),
+            room_id.as_protocol_id(),
             ctx,
             message,
             pending_response,
@@ -118,14 +114,23 @@ impl Behaviour {
         );
     }
 
-    fn request_computation(&mut self, session_id: SessionId, ctx: ProtoContext) {
-        self.broadcast.broadcast_message(
-            vec![], // TODO: self.peerset.state().connected_peers(),
-            protocol_id,
-            ctx,
-            message,
-            pending_response,
-            connect,
+    fn request_computation(
+        &mut self,
+        peer: &PeerId,
+        room_id: RoomId,
+        session_id: SessionId,
+        ack: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+    ) {
+        self.broadcast.send_message(
+            peer,
+            room_id.as_protocol_id(),
+            ProtoContext {
+                session_id: session_id.into(),
+                round_index: 0,
+            },
+            message, // todo
+            ack,
+            broadcast::IfDisconnected::TryConnect,
         );
     }
 
@@ -149,9 +154,13 @@ impl Behaviour {
             match futures::Stream::poll_next(Pin::new(&mut self.peerset), cx) {
                 Poll::Ready(Some(mpc_peerset::Message::Connect {
                     peer_id,
+                    room_id,
                     session_id,
                     ack,
-                })) => self.request_computation(),
+                })) => {
+                    self.request_computation(&peer_id, room_id, session_id, ack);
+                    break;
+                }
                 Poll::Ready(Some(mpc_peerset::Message::Drop { peer_id, .. })) => {
                     return Poll::Ready(NetworkBehaviourAction::CloseConnection {
                         peer_id,
@@ -178,8 +187,10 @@ impl NetworkBehaviourEventProcess<broadcast::BroadcastOut> for Behaviour {
                 protocol,
                 result: _,
             } => {
-                self.events
-                    .push_back(BehaviourOut::InboundMessage { peer, protocol });
+                self.events.push_back(BehaviourOut::InboundMessage {
+                    peer,
+                    room_id: protocol,
+                });
             }
             broadcast::BroadcastOut::BroadcastFinished {
                 peer,
@@ -202,15 +213,11 @@ impl NetworkBehaviourEventProcess<broadcast::BroadcastOut> for Behaviour {
 impl NetworkBehaviourEventProcess<DiscoveryOut> for Behaviour {
     fn inject_event(&mut self, event: DiscoveryOut) {
         match event {
-            DiscoveryOut::Connected(peer_id) => {
-                for (set, _) in self.rooms.iter().enumerate() {
-                    self.peerset.incoming_connection(set.into(), &peer_id);
-                }
+            DiscoveryOut::Connected(room_id, peer_id) => {
+                self.peerset.incoming_connection(&room_id, &peer_id);
             }
-            DiscoveryOut::Disconnected(peer_id) => {
-                for room in self.rooms.iter() {
-                    self.peerset.closed_connection(set.into(), &peer_id);
-                }
+            DiscoveryOut::Disconnected(room_id, peer_id) => {
+                self.peerset.closed_connection(&room_id, &peer_id);
             }
         }
     }

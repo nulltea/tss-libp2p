@@ -1,14 +1,15 @@
 use crate::broadcast;
 use anyhow::anyhow;
+use futures::channel::mpsc;
 use libp2p::identity::{ed25519, Keypair};
 use libp2p::{multiaddr, Multiaddr, PeerId};
+use mpc_peerset::RoomId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::mpsc;
 use std::{fmt, fs, io};
 use zeroize::Zeroize;
 
@@ -21,11 +22,11 @@ pub struct Params {
     /// Kademlia discovery enabled.
     pub kademlia: bool,
     /// Rooms
-    pub rooms: Vec<RoomConfig>,
+    pub rooms: Vec<RoomArgs>,
 }
 
-pub struct RoomConfig {
-    pub name: String,
+pub struct RoomArgs {
+    pub id: RoomId,
 
     pub max_size: usize,
 
@@ -34,6 +35,25 @@ pub struct RoomConfig {
 
     /// Channel on which the networking service will send incoming messages.
     pub inbound_queue: Option<mpsc::Sender<broadcast::IncomingMessage>>,
+}
+
+impl RoomArgs {
+    pub fn new_full(
+        name: String,
+        boot_peers: impl Iterator<Item = MultiaddrWithPeerId>,
+        max_size: usize,
+    ) -> (RoomId, Self, mpsc::Receiver<broadcast::IncomingMessage>) {
+        let id = RoomId::from(name);
+        let (tx, rx) = mpsc::channel(max_size);
+        let cfg = Self {
+            id,
+            max_size,
+            boot_peers: boot_peers.collect(),
+            inbound_queue: Some(tx),
+        };
+
+        (id, cfg, rx)
+    }
 }
 
 /// The configuration of a node's secret key, describing the type of key

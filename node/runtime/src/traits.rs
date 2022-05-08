@@ -7,8 +7,6 @@ pub trait ComputeAgent {
 
     fn construct_state(&mut self, i: u16, n: u16) -> Self::StateMachine;
 
-    fn protocol_id(&self) -> Cow<'static, str>;
-
     fn session_id(&self) -> SessionId;
 
     fn done(self: Box<Self>, result: anyhow::Result<<Self::StateMachine as StateMachine>::Output>);

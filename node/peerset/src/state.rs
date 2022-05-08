@@ -17,7 +17,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{
-    ConnectedPeer, MembershipState, NotConnectedPeer, Peer, SessionId, SetConfig, SetId, SetInfo,
+    ConnectedPeer, MembershipState, NotConnectedPeer, Peer, RoomId, SessionId, SetConfig, SetInfo,
     UnknownPeer,
 };
 use fnv::FnvHashMap;
@@ -32,15 +32,14 @@ use std::{borrow::Cow, collections::HashMap};
 /// This struct is nothing more but a data structure containing a list of nodes, where each node
 /// is either connected to us or not.
 #[derive(Debug, Clone)]
-pub struct PeersState {
+pub(crate) struct PeersState {
     /// List of nodes that we know about.
     pub(crate) nodes: HashMap<PeerId, Node>,
 
     /// Configuration of the set.
-    pub(crate) sets: Vec<SetInfo>,
+    pub(crate) rooms: HashMap<RoomId, SetInfo>,
 
-    /// Sets utilization mapped by session ids.
-    pub(crate) sessions: HashMap<SessionId, usize>,
+    pub(crate) sessions: HashMap<SessionId, RoomId>,
 }
 
 impl PeersState {
@@ -48,7 +47,7 @@ impl PeersState {
     pub fn new(sets: impl IntoIterator<Item = SetConfig>) -> Self {
         Self {
             nodes: HashMap::default(),
-            sets: sets
+            rooms: sets
                 .into_iter()
                 .map(|config| SetInfo {
                     num_peers: 0,
@@ -56,27 +55,26 @@ impl PeersState {
                     initial_nodes: config.boot_nodes.into_iter().collect(),
                 })
                 .collect(),
-            sessions: HashMap::default(),
         }
     }
 
     /// Returns an object that grants access to the state of a peer in the context of the set.
-    pub fn peer<'a>(&'a mut self, set: usize, peer_id: &'a PeerId) -> Peer<'a> {
-        assert!(self.sets.len() >= set);
+    pub fn peer<'a>(&'a mut self, room_id: &RoomId, peer_id: &'a PeerId) -> Peer<'a> {
+        assert!(self.rooms.contains_key(&room_id));
 
-        match self.nodes.get(peer_id).map(|n| *n.sets[set]) {
+        match self.nodes.get(peer_id).map(|n| *n.rooms.get(&room_id)) {
             None | Some(MembershipState::NotMember) => Peer::Unknown(UnknownPeer {
-                set,
-                parent: self,
+                room_id: room_id.clone(),
+                state: self,
                 peer_id: Cow::Borrowed(peer_id),
             }),
             Some(MembershipState::Connected) => Peer::Connected(ConnectedPeer {
-                set,
+                room_id: room_id.clone(),
                 state: self,
                 peer_id: Cow::Borrowed(peer_id),
             }),
             Some(MembershipState::NotConnected { .. }) => Peer::NotConnected(NotConnectedPeer {
-                set,
+                room_id: room_id.clone(),
                 state: self,
                 peer_id: Cow::Borrowed(peer_id),
             }),
@@ -85,35 +83,35 @@ impl PeersState {
 
     /// Returns the list of all the peers we know of.
     /// todo sample sorting
-    pub fn sample_peers(&self, set: usize) -> impl Iterator<Item = PeerId> {
-        assert!(self.sets.len() >= set);
+    pub fn sample_peers(&self, room_id: &RoomId) -> impl Iterator<Item = PeerId> {
+        assert!(self.rooms.contains_key(&room_id));
 
         Ok(self
             .nodes
             .iter()
-            .filter(move |(_, n)| n.sets[set].is_member())
+            .filter(move |(_, n)| n.rooms.contains_key(room_id))
             .sorted_by_key(|(p, _)| p.to_bytes())
             .map(|(p, _)| p.clone()))
     }
 
     /// Returns the index of a specified peer in a given set.
-    pub fn index_of(&self, set: usize, peer: PeerId) -> Option<usize> {
-        assert!(self.sets.len() >= set);
+    pub fn index_of(&self, room_id: &RoomId, peer: PeerId) -> Option<usize> {
+        assert!(self.rooms.contains_key(&room_id));
 
         self.nodes
             .iter()
-            .filter(move |(_, n)| n.sets[set].is_member())
+            .filter(move |(_, n)| n.member_of_and(room_id, |ms| ms.is_connected()))
             .sorted_by_key(|(p, _)| p.to_bytes())
             .position(|elem| *elem == peer)
     }
 
     /// Returns the index of a specified peer in a given set.
-    pub fn at_index(&self, set: usize, index: usize) -> Option<PeerId> {
-        assert!(self.sets.len() >= set);
+    pub fn at_index(&self, room_id: &RoomId, index: usize) -> Option<PeerId> {
+        assert!(self.rooms.contains_key(&room_id));
 
         self.nodes
             .iter()
-            .filter(move |(_, n)| n.sets[set].is_member())
+            .filter(move |(_, n)| n.member_of_and(room_id, |ms| ms.is_connected()))
             .map(|(p, _)| p)
             .sorted_by_key(|p| p.to_bytes())
             .enumerate()
@@ -121,24 +119,13 @@ impl PeersState {
     }
 
     /// Returns the list of peers we are connected to in the context of the set.
-    pub fn connected_peers(&self, set: usize) -> impl ExactSizeIterator<Item = &PeerId> {
-        assert!(self.sets.len() >= set);
+    pub fn connected_peers(&self, room_id: &RoomId) -> impl Iterator<Item = &PeerId> {
+        assert!(self.rooms.contains_key(&room_id));
 
         self.nodes
             .iter()
-            .filter(move |(p, n)| n.sets[set].is_connected())
+            .filter(move |(_, n)| n.member_of_and(room_id, |ms| ms.is_connected()))
             .map(|(p, _)| p)
-    }
-
-    /// Returns peer's membership state in the set.
-    pub fn peer_membership(&self, peer_id: &PeerId, set: usize) -> Option<MembershipState> {
-        assert!(self.sets.len() >= set);
-
-        self.nodes
-            .iter()
-            .find(move |(p, _)| p.to_bytes() == peer_id.to_bytes())
-            .map(|(_, s)| *s.sets[set])
-            .unwrap_or(MembershipState::NotMember)
     }
 }
 
@@ -146,13 +133,20 @@ impl PeersState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Node {
     /// Map of sets the node to session_ids.
-    pub(crate) sets: Vec<MembershipState>,
+    pub(crate) rooms: HashMap<RoomId, MembershipState>,
 }
 
 impl Node {
-    pub(crate) fn new(num_sets: usize) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            sets: (0..num_sets).map(|_| MembershipState::NotMember).collect(),
+            rooms: (0..num_sets).map(|_| MembershipState::NotMember).collect(),
         }
+    }
+
+    fn member_of_and<P>(&self, room_id: &RoomId, predicate: P) -> bool
+    where
+        P: FnOnce(&MembershipState) -> bool,
+    {
+        self.rooms.contains_key(room_id) && self.rooms.get(room_id).map(predicate).unwrap()
     }
 }

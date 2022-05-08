@@ -81,23 +81,17 @@ pub struct ProtocolConfig {
 }
 
 impl ProtocolConfig {
-    pub fn new(name: Cow<'static, str>, inbound_sender: mpsc::Sender<IncomingMessage>) -> Self {
+    pub fn new(
+        name: Cow<'static, str>,
+        inbound_queue: Option<mpsc::Sender<IncomingMessage>>,
+    ) -> Self {
         Self {
             name,
             max_request_size: 8 * 1024 * 1024,
             max_response_size: 10 * 1024,
             request_timeout: Duration::from_secs(20),
-            inbound_queue: Some(inbound_sender),
+            inbound_queue,
         }
-    }
-
-    pub fn new_with_receiver(
-        name: Cow<'static, str>,
-        buffer_size: usize,
-    ) -> (Self, mpsc::Receiver<IncomingMessage>) {
-        let (inbound_sender, inbound_receiver) = mpsc::channel(buffer_size);
-
-        (Self::new(name, inbound_sender), inbound_receiver)
     }
 }
 

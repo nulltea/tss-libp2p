@@ -1,6 +1,5 @@
 use anyhow::anyhow;
 
-use crate::KEYGEN_PROTOCOL_ID;
 use curv::elliptic::curves::{Point, Secp256k1};
 
 use futures::future::TryFutureExt;
@@ -31,10 +30,6 @@ impl mpc_runtime::ComputeAgent for DKG {
     fn construct_state(&mut self, i: u16, n: u16) -> Keygen {
         self.i = Some(i);
         Keygen::new(i, self.t, n).unwrap()
-    }
-
-    fn protocol_id(&self) -> Cow<'static, str> {
-        Cow::Borrowed(KEYGEN_PROTOCOL_ID)
     }
 
     fn session_id(&self) -> SessionId {

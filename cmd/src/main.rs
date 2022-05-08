@@ -11,11 +11,11 @@ use gumdrop::Options;
 use libp2p::PeerId;
 use log::error;
 use mpc_api::RpcApi;
-use mpc_p2p::{broadcast, NetworkWorker, NodeKeyConfig, Params, Params, RoomConfig, Secret};
+use mpc_p2p::{broadcast, NetworkWorker, NodeKeyConfig, Params, RoomArgs, Secret};
 use mpc_peerset::{Peerset, PeersetConfig, SetConfig};
 use mpc_rpc::server::JsonRPCServer;
 use mpc_runtime::RuntimeDaemon;
-use mpc_tss::{generate_config, Config, KEYGEN_PROTOCOL_ID};
+use mpc_tss::{generate_config, Config};
 use sha3::Digest;
 use std::borrow::Cow;
 use std::error::Error;
@@ -57,42 +57,25 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         .map(|p| p.network_peer.clone())
         .collect();
 
-    let (keygen_config, keygen_receiver) = broadcast::ProtocolConfig::new_with_receiver(
-        KEYGEN_PROTOCOL_ID.into(),
-        config.parties.len() - 1,
-    );
+    let (room_id, room_cfg, room_rx) =
+        RoomArgs::new_full("tss/0".to_string(), boot_peers, config.parties.len());
 
     let (net_worker, net_service) = {
-        let network_config = Params {
+        let cfg = Params {
             listen_address: local_party.network_peer.multiaddr.clone(),
-            rooms: vec![RoomConfig {
-                name: "tss/0".to_string(),
-                max_size: config.parties.len(),
-                boot_peers,
-            }],
+            rooms: vec![room_cfg],
             mdns: args.mdns,
             kademlia: args.kademlia,
         };
 
-        let broadcast_protocols = vec![keygen_config];
-
-        NetworkWorker::new(
-            node_key,
-            Params {
-                network_config,
-                rooms: broadcast_protocols,
-            },
-        )?
+        NetworkWorker::new(node_key, cfg)?
     };
 
     let net_task = task::spawn(async {
         net_worker.run().await;
     });
 
-    let (rt_worker, rt_service) = RuntimeDaemon::new(
-        net_service,
-        vec![((Cow::Borrowed(KEYGEN_PROTOCOL_ID), keygen_receiver))].into_iter(),
-    );
+    let (rt_worker, rt_service) = RuntimeDaemon::new(net_service, iter::once((room_id, room_rx)));
 
     let rt_task = task::spawn(async {
         rt_worker.run().await;
@@ -120,36 +103,30 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
 }
 
 async fn keygen(args: KeygenArgs) -> anyhow::Result<()> {
-    let mut futures = vec![];
-    for addr in args.addresses {
-        futures.push(mpc_rpc::new_client(addr).await?.keygen(args.threshold));
-    }
+    let res = mpc_rpc::new_client(args.address)
+        .await?
+        .keygen(args.room, args.number_of_parties, args.threshold)
+        .await;
 
-    let mut pub_key_hash = None;
-
-    for res in futures.into_iter() {
-        match res.await {
-            Ok(pub_key) => {
-                let hash = sha3::Keccak256::digest(pub_key.to_bytes(true).to_vec());
-                if matches!(pub_key_hash, Some(pk_hash) if pk_hash != hash) {
-                    error!(
-                        "received inconsistent public key (prev={:x}, new={:x})",
-                        pub_key_hash.unwrap(),
-                        hash
-                    )
-                } else {
-                    pub_key_hash = Some(sha3::Keccak256::digest(pub_key.to_bytes(true).to_vec()))
-                }
-            }
-            Err(e) => {
-                return Err(anyhow!("received error: {}", e));
+    let pub_key_hash = match res {
+        Ok(pub_key) => {
+            let hash = sha3::Keccak256::digest(pub_key.to_bytes(true).to_vec());
+            if matches!(pub_key_hash, Some(pk_hash) if pk_hash != hash) {
+                return Err(anyhow!(
+                    "received inconsistent public key (prev={:x}, new={:x})",
+                    pub_key_hash.unwrap(),
+                    hash
+                ));
+            } else {
+                sha3::Keccak256::digest(pub_key.to_bytes(true).to_vec())
             }
         }
-    }
+        Err(e) => {
+            return Err(anyhow!("received error: {}", e));
+        }
+    };
 
-    if let Some(address) = pub_key_hash {
-        println!("Keygen finished! Keccak256 address => 0x{:x}", address);
-    }
+    println!("Keygen finished! Keccak256 address => 0x{:x}", pub_key_hash);
 
     Ok(())
 }
