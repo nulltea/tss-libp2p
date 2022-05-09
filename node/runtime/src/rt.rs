@@ -5,8 +5,8 @@ use anyhow::anyhow;
 use async_std::prelude::Stream;
 use async_std::task;
 use blake2::Digest;
-use futures::channel::mpsc;
 use futures::channel::mpsc::{Receiver, TryRecvError};
+use futures::channel::{mpsc, oneshot};
 use futures::{Sink, StreamExt};
 use futures_util::stream::{Fuse, FuturesUnordered};
 use futures_util::{future, pin_mut, select, FutureExt, SinkExt};
@@ -79,20 +79,21 @@ impl RuntimeDaemon {
                     let daemon = service_messages.get_ref();
 
                     match srv_msg {
-                        RuntimeMessage::JoinComputation(n, pa) => match pa {
+                        RuntimeMessage::JoinComputation(room_id, n, pa) => match pa {
                             ProtocolAgent::Keygen(agent) => {
-                                let (proxy_tx, net_rx) = mpsc::channel(n - 1);
-                                match daemon.proxy_incoming_messages(agent.protocol_id(), proxy_tx) {
+                                let (proxy_tx, net_rx) = mpsc::channel((n - 1) as usize);
+                                match daemon.proxy_incoming_messages(room_id, proxy_tx) {
                                     Ok(fut) => {
                                         network_proxies.push(fut);
-                                        let (mut echo, echo_tx) = EchoGadget::new(n);
+                                        let (mut echo, echo_tx) = EchoGadget::new(n as usize);
                                         protocol_executions.push(echo.wrap_execution(
                                             join_computation(
-                                                n as u16,
+                                                room_id,
                                                 agent,
                                                 daemon.network_service.clone(),
                                                 net_rx,
                                                 echo_tx,
+                                                n,
                                             ),
                                         ));
                                     }
@@ -114,36 +115,13 @@ impl RuntimeDaemon {
                 }
             }
 
-            if let Ok(Some(srv_msg)) = self.from_service.try_next() {
-                let daemon = service_messages.get_ref();
-
-                match srv_msg {
-                    RuntimeMessage::JoinComputation(room_id, n, pa) => match pa {
-                        ProtocolAgent::Keygen(agent) => {
-                            let (proxy_tx, net_rx) = mpsc::channel((n - 1) as usize);
-                            match daemon.proxy_incoming_messages(room_id, proxy_tx) {
-                                Ok(fut) => {
-                                    network_proxies.push(fut);
-                                    let (mut echo, echo_tx) = EchoGadget::new(n as usize);
-                                    protocol_executions.push(echo.wrap_execution(
-                                        join_computation(
-                                            room_id,
-                                            agent,
-                                            daemon.network_service.clone(),
-                                            net_rx,
-                                            echo_tx,
-                                            n,
-                                        ),
-                                    ));
-                                }
-                                Err(e) => {
-                                    agent.done(Err(anyhow!("computation failed to start: {e}")));
-                                }
-                            }
-                        }
-                    },
-                }
-            }
+            // if let Ok(Some(srv_msg)) = self.from_service.try_next() {
+            //     let daemon = service_messages.get_ref();
+            //
+            //     match srv_msg {
+            //
+            //     }
+            // }
         }
     }
 
@@ -370,5 +348,106 @@ impl Stream for RuntimeDaemon {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.from_service.poll_next_unpin(cx)
+    }
+}
+
+struct CoordinationChannel {
+    id: RoomId,
+    rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
+    pull_back: oneshot::Receiver<(u16, ProtocolAgent)>,
+}
+
+impl<T> Future for CoordinationChannel {
+    type Output = CoordinationPhase1;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.rx.as_mut().unwrap().try_next() {
+            Ok(Some(msg)) => {
+                /// todo: somehow check that we actually received `join_computation` request
+                return Poll::Ready(CoordinationPhase1::Remote {
+                    peer_id: msg.peer_index, // todo: should be PeerId !!!
+                    payload: msg.payload,
+                    response_tx: msg.pending_response,
+                    channel: JoinChannel {
+                        id: self.id.clone(),
+                        rx: self.rx.take(),
+                    },
+                });
+            }
+            _ => {}
+        }
+
+        if let Some((n, agent)) = self.pull_back.try_recv().unwrap() {
+            return Poll::Ready(CoordinationPhase1::Local {
+                id: self.id.clone(),
+                n,
+                rx: self.rx.take(),
+            });
+        }
+
+        // Wake this task to be polled again.
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+// dude, these are session types, todo: try using dedicated library
+enum CoordinationPhase1 {
+    Remote {
+        peer_id: u16,                                   // todo: PeerId
+        payload: Vec<u8>, // for negotiation and stuff, todo: should contain protocol_id explicitly
+        response_tx: oneshot::Sender<OutgoingResponse>, // responds if negotiation is fine
+        channel: JoinChannel, // listens after it responds
+    },
+    Local {
+        id: RoomId,
+        n: u16,
+        rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
+    },
+}
+
+/// todo: this struct is the same as `CoordinationChannel` how can we implement them differently (?)
+struct JoinChannel {
+    id: RoomId,
+    rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
+}
+
+enum CoordinationPhase2 {
+    Start {
+        room_id: RoomId,
+        room_receiver: mpsc::Receiver<broadcast::IncomingMessage>, // hmm todo: maybe wrap it in the similar kind of struct (?)
+                                                                   /* protocol_id:
+                                                                   session_id: SessionId
+                                                                   n: u16
+                                                                    */
+    },
+    Abort(CoordinationChannel),
+}
+
+impl<T> Future for JoinChannel {
+    type Output = CoordinationPhase2;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.rx.as_mut().unwrap().try_next() {
+            Ok(Some(msg)) => {
+                if true
+                /* todo: some check logic here */
+                {
+                    return Poll::Ready(CoordinationPhase2::Start {
+                        room_id: self.id.clone(),
+                        room_receiver: self.rx.take().unwrap(),
+                    });
+                } else {
+                    return Poll::Ready(CoordinationPhase2::Abort(CoordinationChannel {
+                        id: self.id.clone(),
+                        rx: self.rx.take(),
+                    }));
+                }
+            }
+            _ => {}
+        }
+
+        // Wake this task to be polled again.
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 }
