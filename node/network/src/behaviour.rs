@@ -1,6 +1,6 @@
-use crate::broadcast::ProtoContext;
+use crate::broadcast::MessageContext;
 use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
-use crate::{broadcast, Params, RoomArgs};
+use crate::{broadcast, MessageType, Params, RoomArgs};
 use async_std::task;
 use futures::channel::mpsc;
 use libp2p::core::connection::ConnectionId;
@@ -81,7 +81,7 @@ impl Behaviour {
         peer: &PeerId,
         message: Vec<u8>,
         room_id: RoomId,
-        ctx: ProtoContext,
+        ctx: MessageContext,
         pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
@@ -100,7 +100,7 @@ impl Behaviour {
         &mut self,
         message: Vec<u8>,
         room_id: RoomId,
-        ctx: ProtoContext,
+        ctx: MessageContext,
         pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
@@ -124,9 +124,10 @@ impl Behaviour {
         self.broadcast.send_message(
             peer,
             room_id.as_protocol_id(),
-            ProtoContext {
+            MessageContext {
+                message_type: MessageType::Coordination,
                 session_id: session_id.into(),
-                round_index: 0,
+                protocol_id: 0,
             },
             message, // todo
             ack,

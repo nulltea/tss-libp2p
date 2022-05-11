@@ -25,7 +25,7 @@ enum Action {
     AddToPeersSet(RoomId, PeerId),
     RemoveFromPeersSet(RoomId, PeerId),
 
-    AllocateForSession(RoomId, SessionId, mpsc::Sender<()>),
+    AllocateForSession(RoomId, SessionId, mpsc::Sender<Result<Vec<u8>, ()>>),
     GetPeerIndex(RoomId, PeerId, oneshot::Sender<u16>),
     GetPeerAtIndex(RoomId, u16, oneshot::Sender<PeerId>),
 }
@@ -105,7 +105,7 @@ pub enum Message {
         peer_id: PeerId,
         room_id: RoomId,
         session_id: SessionId,
-        ack: mpsc::Sender<()>,
+        ack: mpsc::Sender<Result<Vec<u8>, ()>>,
     },
 
     /// Drop the connection to the given peer, or cancel the connection attempt after a `Connect`.

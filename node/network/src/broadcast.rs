@@ -47,7 +47,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::messages::{GenericCodec, WireMessage};
+use crate::messages::{GenericCodec, MessageContext, WireMessage};
 use libp2p::request_response::RequestResponseCodec;
 pub use libp2p::request_response::{InboundFailure, OutboundFailure, RequestId};
 use log::error;
@@ -95,15 +95,12 @@ impl ProtocolConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct ProtoContext {
-    pub session_id: u64,
-    pub round_index: u16,
-}
-
 /// A single request received by a peer on a request-response protocol.
 #[derive(Debug)]
 pub struct IncomingMessage {
+    /// Who sent the request.
+    pub peer_id: PeerId,
+
     /// Who sent the request.
     pub peer_index: u16,
 
@@ -118,7 +115,7 @@ pub struct IncomingMessage {
     pub pending_response: oneshot::Sender<OutgoingResponse>,
 
     /// Protocol execution context.
-    pub context: ProtoContext,
+    pub context: MessageContext,
 }
 
 /// Response for an incoming request to be send by a request protocol handler.
@@ -131,12 +128,6 @@ pub struct OutgoingResponse {
 
     /// If provided, the `oneshot::Sender` will be notified when the request has been sent to the
     /// peer.
-    ///
-    /// > **Note**: Operating systems typically maintain a buffer of a few dozen kilobytes of
-    /// >			outgoing data for each TCP socket, and it is not possible for a user
-    /// >			application to inspect this buffer. This channel here is not actually notified
-    /// >			when the response has been fully sent out, but rather when it has fully been
-    /// >			written to the buffer managed by the operating system.
     pub sent_feedback: Option<oneshot::Sender<()>>,
 }
 
@@ -331,7 +322,7 @@ impl Broadcast {
         &mut self,
         target: &PeerId,
         protocol_id: &str,
-        ctx: ProtoContext,
+        ctx: MessageContext,
         payload: Vec<u8>,
         pending_response: mpsc::Sender<Result<Vec<u8>, RequestFailure>>,
         connect: IfDisconnected,
@@ -353,7 +344,7 @@ impl Broadcast {
         &mut self,
         targets: impl Iterator<Item = &'a PeerId>,
         protocol_id: &str,
-        ctx: ProtoContext,
+        ctx: MessageContext,
         payload: Vec<u8>,
         pending_response: mpsc::Sender<Result<Vec<u8>, RequestFailure>>,
         connect: IfDisconnected,
@@ -614,6 +605,7 @@ impl NetworkBehaviour for Broadcast {
                         // initialization.
                         if let Some(mut resp_builder) = resp_builder {
                             let _ = resp_builder.try_send(IncomingMessage {
+                                peer_id: peer,
                                 peer_index,
                                 is_broadcast: request.is_broadcast,
                                 payload: request.payload,

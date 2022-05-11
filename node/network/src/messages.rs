@@ -1,12 +1,24 @@
-use crate::broadcast::ProtoContext;
+use crate::broadcast::{MessageContext, MessageType};
 use futures::prelude::*;
 use libp2p::request_response::RequestResponseCodec;
 use std::io;
 
 pub struct WireMessage {
-    pub context: ProtoContext,
+    pub context: MessageContext,
     pub payload: Vec<u8>,
     pub is_broadcast: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MessageContext {
+    pub message_type: MessageType,
+    pub session_id: u64,
+    pub protocol_id: u64,
+}
+
+pub enum MessageType {
+    Coordination = 1,
+    Computation,
 }
 
 /// Implements the libp2p [`RequestResponseCodec`] trait. Defines how streams of bytes are turned
@@ -32,6 +44,11 @@ impl RequestResponseCodec for GenericCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
+        let message_type: MessageType = unsigned_varint::aio::read_u8(&mut io)
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?
+            .into();
+
         let is_broadcast = unsigned_varint::aio::read_u8(&mut io)
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
@@ -40,7 +57,7 @@ impl RequestResponseCodec for GenericCodec {
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
-        let round_index = unsigned_varint::aio::read_u16(&mut io)
+        let protocol_id = unsigned_varint::aio::rea(&mut io)
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
@@ -64,12 +81,13 @@ impl RequestResponseCodec for GenericCodec {
         io.read_exact(&mut buffer).await?;
 
         Ok(WireMessage {
-            context: ProtoContext {
+            context: MessageContext {
+                message_type,
                 session_id,
-                round_index,
+                protocol_id,
             },
             payload: buffer,
-            is_broadcast: is_broadcast != 0,
+            is_broadcast: is_broadcast.into(),
         })
     }
 
@@ -81,11 +99,6 @@ impl RequestResponseCodec for GenericCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        // Note that this function returns a `Result<Result<...>>`. Returning an `Err` is
-        // considered as a protocol error and will result in the entire connection being closed.
-        // Returning `Ok(Err(_))` signifies that a response has successfully been fetched, and
-        // that this response is an error.
-
         // Read the length.
         let length = match unsigned_varint::aio::read_usize(&mut io).await {
             Ok(l) => l,
@@ -122,6 +135,16 @@ impl RequestResponseCodec for GenericCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        // Write message type
+        {
+            let mut buffer = unsigned_varint::encode::u8_buffer();
+            io.write_all(unsigned_varint::encode::u8(
+                req.context.message_type as u8,
+                &mut buffer,
+            ))
+            .await?;
+        }
+
         // Write broadcast marker
         {
             let mut buffer = unsigned_varint::encode::u8_buffer();
@@ -193,135 +216,6 @@ impl RequestResponseCodec for GenericCodec {
         }
 
         io.close().await?;
-        Ok(())
-    }
-}
-
-struct CoordCodec;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum ElectionMessage {
-    Propose,
-    Aye,
-    Nae,
-}
-
-#[async_trait::async_trait]
-impl RequestResponseCodec for CoordCodec {
-    type Protocol = Vec<u8>;
-    type Request = ElectionMessage;
-    type Response = ElectionMessage;
-
-    async fn read_request<T>(
-        &mut self,
-        _: &Self::Protocol,
-        mut io: &mut T,
-    ) -> io::Result<Self::Request>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        let length = unsigned_varint::aio::read_usize(&mut io)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-        if length > 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Request size exceeds limit: {} > {}", length, 1024),
-            ));
-        }
-
-        // Read the payload.
-        let mut buffer = vec![0; length];
-        io.read_exact(&mut buffer).await?;
-
-        serde_ipld_dagcbor::from_slice(&*buffer)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-    }
-
-    async fn read_response<T>(
-        &mut self,
-        _: &Self::Protocol,
-        mut io: &mut T,
-    ) -> io::Result<Self::Response>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        // Read the length.
-        let length = unsigned_varint::aio::read_usize(&mut io)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-        if length > 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Response size exceeds limit: {} > {}", length, 1024),
-            ));
-        }
-
-        // Read the payload.
-        let mut buffer = vec![0; length];
-        io.read_exact(&mut buffer).await?;
-
-        serde_ipld_dagcbor::from_slice(&*buffer)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-    }
-
-    async fn write_request<T>(
-        &mut self,
-        _: &Self::Protocol,
-        io: &mut T,
-        req: Self::Request,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        // Write the length.
-        {
-            let mut buffer = unsigned_varint::encode::usize_buffer();
-            io.write_all(unsigned_varint::encode::usize(
-                req.payload.len(),
-                &mut buffer,
-            ))
-            .await?;
-        }
-
-        let bytes = serde_ipld_dagcbor::to_vec(&req)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-        // Write the payload.
-        io.write_all(&bytes).await?;
-        io.close().await?;
-
-        Ok(())
-    }
-
-    async fn write_response<T>(
-        &mut self,
-        _: &Self::Protocol,
-        io: &mut T,
-        res: Self::Response,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        // Write the length.
-        {
-            let mut buffer = unsigned_varint::encode::usize_buffer();
-            io.write_all(unsigned_varint::encode::usize(
-                req.payload.len(),
-                &mut buffer,
-            ))
-            .await?;
-        }
-
-        let bytes = serde_ipld_dagcbor::to_vec(&res)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-        // Write the payload.
-        io.write_all(&bytes).await?;
-        io.close().await?;
-
         Ok(())
     }
 }

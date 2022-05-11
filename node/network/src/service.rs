@@ -1,4 +1,4 @@
-use crate::broadcast::{IfDisconnected, ProtoContext, ProtocolConfig};
+use crate::broadcast::{IfDisconnected, MessageContext, ProtocolConfig};
 use crate::error::Error;
 use crate::{
     behaviour::{Behaviour, BehaviourOut},
@@ -36,7 +36,6 @@ pub enum NetworkMessage {
     CrossRoundExchange {
         session_id: u64,
         room_id: RoomId,
-        round_index: u16,
         message: MessageRouting,
     },
 }
@@ -243,7 +242,6 @@ impl NetworkService {
         &self,
         session_id: u64,
         room_id: RoomId,
-        round_index: u16,
         payload: Vec<u8>,
         response_sender: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
     ) {
@@ -251,7 +249,6 @@ impl NetworkService {
             .send(NetworkMessage::CrossRoundExchange {
                 session_id,
                 room_id,
-                round_index,
                 message: MessageRouting::Broadcast(payload, response_sender),
             })
             .await;
@@ -261,7 +258,6 @@ impl NetworkService {
         &self,
         session_id: u64,
         room_id: RoomId,
-        round_index: u16,
         peer_index: u16,
         payload: Vec<u8>,
         response_sender: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
@@ -270,7 +266,6 @@ impl NetworkService {
             .send(NetworkMessage::CrossRoundExchange {
                 session_id,
                 room_id,
-                round_index,
                 message: MessageRouting::SendDirect(peer_index, payload, response_sender),
             })
             .await;

@@ -9,6 +9,7 @@ mod messages;
 mod service;
 
 pub use self::config::*;
+pub use self::messages::*;
 pub use self::service::*;
 
 /// The maximum allowed number of established connections per peer.

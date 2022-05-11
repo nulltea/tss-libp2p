@@ -1,11 +1,13 @@
+use crate::coordination::{Phase1Channel, Phase2Msg};
 use crate::echo::{EchoGadget, EchoMessage, EchoResponse};
 use crate::traits::ComputeAgent;
-use crate::{Error, ProtocolAgent};
+use crate::{coordination, Error, ProtocolAgent};
 use anyhow::anyhow;
 use async_std::prelude::Stream;
 use async_std::task;
 use blake2::Digest;
 use futures::channel::mpsc::{Receiver, TryRecvError};
+use futures::channel::oneshot::Sender;
 use futures::channel::{mpsc, oneshot};
 use futures::{Sink, StreamExt};
 use futures_util::stream::{Fuse, FuturesUnordered};
@@ -14,6 +16,7 @@ use log::{error, info};
 use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
 use mpc_p2p::{broadcast, NetworkService};
 use mpc_peerset::RoomId;
+use round_based::async_runtime::Error::Send;
 use round_based::{AsyncProtocol, Msg, StateMachine};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -46,21 +49,24 @@ impl RuntimeService {
 
 pub struct RuntimeDaemon {
     network_service: NetworkService,
-    rooms: RwLock<HashMap<RoomId, mpsc::Receiver<broadcast::IncomingMessage>>>,
+    rooms: HashMap<RoomId, mpsc::Receiver<broadcast::IncomingMessage>>,
+    protocols: HashMap<u64, ProtocolAgent>,
     from_service: mpsc::Receiver<RuntimeMessage>,
 }
 
 impl RuntimeDaemon {
     pub fn new(
         network_service: NetworkService,
-        protocol_receivers: impl Iterator<Item = (RoomId, mpsc::Receiver<broadcast::IncomingMessage>)>,
+        rooms: impl Iterator<Item = (RoomId, mpsc::Receiver<broadcast::IncomingMessage>)>,
+        protocols: impl Iterator<Item = (u64, ProtocolAgent)>,
     ) -> (Self, RuntimeService) {
         let (tx, rx) = mpsc::channel(2);
 
         let worker = Self {
             network_service,
-            rooms: RwLock::new(protocol_receivers.collect()),
+            rooms: rooms.collect(),
             from_service: rx,
+            protocols: protocols.collect(),
         };
 
         let service = RuntimeService { to_runtime: tx };
@@ -72,6 +78,23 @@ impl RuntimeDaemon {
         let mut service_messages = self.fuse();
         let mut protocol_executions = FuturesUnordered::new();
         let mut network_proxies = FuturesUnordered::new();
+        let mut room_coordination = self.rooms_coordination.take().unwrap();
+
+        let mut rooms_coordination = FuturesUnordered::new();
+        let mut rooms_rpc = HashMap::default();
+
+        for (room_id, rx) in self.rooms.into_iter() {
+            let (rpc_tx, rpx_rx) = oneshot::channel();
+            rooms_coordination.push(coordination::Phase1Channel {
+                id: room_id.clone(),
+                rx: Some(rx),
+                on_local_rpc: rpx_rx,
+            });
+            rooms_rpc.insert(room_id, rpc_tx);
+        }
+
+        let daemon = service_messages.get_ref();
+
         loop {
             let self_ref = service_messages.get_ref();
             select! {
@@ -79,32 +102,84 @@ impl RuntimeDaemon {
                     let daemon = service_messages.get_ref();
 
                     match srv_msg {
-                        RuntimeMessage::JoinComputation(room_id, n, pa) => match pa {
-                            ProtocolAgent::Keygen(agent) => {
-                                let (proxy_tx, net_rx) = mpsc::channel((n - 1) as usize);
-                                match daemon.proxy_incoming_messages(room_id, proxy_tx) {
-                                    Ok(fut) => {
-                                        network_proxies.push(fut);
-                                        let (mut echo, echo_tx) = EchoGadget::new(n as usize);
-                                        protocol_executions.push(echo.wrap_execution(
-                                            join_computation(
-                                                room_id,
-                                                agent,
-                                                daemon.network_service.clone(),
-                                                net_rx,
-                                                echo_tx,
-                                                n,
-                                            ),
-                                        ));
+                        RuntimeMessage::JoinComputation(room_id, n, pa) => {
+                            match rooms_rpc.entry(room_id) {
+                                Entry::Occupied(e) => {
+                                    if e.remove().send((n, pa)).is_err() {
+                                        agent.done(Err(anyhow!("protocol is busy")));
                                     }
-                                    Err(e) => {
-                                        agent.done(Err(anyhow!("computation failed to start: {e}")));
-                                    }
+                                }
+                                Entry::Vacant(_) => {
+                                    agent.done(Err(anyhow!("protocol is busy")));
                                 }
                             }
                         },
                     }
                 },
+                coord_msg = rooms_coordination.select_next_some() => match coord_msg {
+                    coordination::Phase1Msg::FromRemote {
+                        peer_id,
+                        protocol_id,
+                        session_id,
+                        payload,
+                        response_tx,
+                        channel,
+                    } => {
+                        let agent = match self.protocols.get_mut(&protocol_id) {
+                            Some(pa) => match pa {
+                                ProtocolAgent::Keygen(a) => Box::new(a.clone()),
+                            },
+                            None => {
+                                return;
+                            }
+                        };
+
+                        response_tx.send(OutgoingResponse {
+                            result: Ok(vec![]),
+                            sent_feedback: None,
+                        });
+
+                        match channel.await {
+                            Phase2Msg::Start {
+                                room_id,
+                                room_receiver,
+                            } => {
+                                let (mut echo, echo_tx) = EchoGadget::new(n as usize);
+                                protocol_executions.push(echo.wrap_execution(join_computation(
+                                    room_id,
+                                    agent,
+                                    daemon.network_service.clone(),
+                                    room_receiver,
+                                    echo_tx,
+                                    n,
+                                )));
+                            }
+                            Phase2Msg::Abort(ch, tx) => {
+                                rooms_rpc.entry(ch.id.clone()).and_modify(|e| *e = tx);
+                                rooms_coordination.push(ch);
+                            }
+                        }
+                    }
+                    coordination::Phase1Msg::FromLocal { id, n, agent, rx } => match agent {
+                        ProtocolAgent::Keygen(agent) => {
+                            let (proxy_tx, net_rx) = mpsc::channel(n - 1);
+                             let fut = ReceiverProxy {
+                                pid: protocol_id,
+                                rx: Some(incoming_receiver),
+                                tx: to,
+                            };
+                            let (mut echo, echo_tx) = EchoGadget::new(n as usize);
+                            protocol_executions.push(echo.wrap_execution(join_computation(
+                                room_id,
+                                agent,
+                                daemon.network_service.clone(),
+                                rx,
+                                echo_tx,
+                                n,
+                            )));
+                        }
+                    },
+                }
                 exec_res = protocol_executions.select_next_some() => match exec_res {
                     Ok(_) => {}
                     Err(e) => {error!("error during computation: {e}")}
@@ -123,38 +198,6 @@ impl RuntimeDaemon {
             //     }
             // }
         }
-    }
-
-    fn proxy_incoming_messages(
-        &self,
-        room_id: RoomId,
-        mut to: mpsc::Sender<IncomingMessage>,
-    ) -> crate::Result<
-        impl Future<
-                Output = (
-                    Cow<'static, str>,
-                    mpsc::Receiver<broadcast::IncomingMessage>,
-                ),
-            > + 'static,
-    > {
-        let mut protocol_receivers = self.rooms.write().unwrap();
-
-        // Mechanism bellow borrows protocol_receiver from hash_map for computation.
-        // For protocols where concurrency is allowed (e.g. signing), 1-m receivers router is needed.
-        let mut incoming_receiver = {
-            match protocol_receivers.entry(room_id.clone()) {
-                Entry::Occupied(e) => Ok(e.remove()),
-                Entry::Vacant(_) => Err(crate::Error::Busy),
-            }
-        }?;
-
-        let fut = ReceiverProxy {
-            id: room_id,
-            rx: Some(incoming_receiver),
-            tx: to,
-        };
-
-        Ok(fut)
     }
 }
 
@@ -272,7 +315,6 @@ where
                     .send_message(
                         session_id,
                         room_id.clone(),
-                        message_round,
                         receiver_index - 1,
                         payload,
                         res_tx,
@@ -291,13 +333,7 @@ where
                 let (res_tx, res_rx) = mpsc::channel((n - 1) as usize);
 
                 network_service
-                    .broadcast_message(
-                        session_id,
-                        room_id.clone(),
-                        message_round,
-                        payload.clone(),
-                        res_tx,
-                    )
+                    .broadcast_message(session_id, room_id.clone(), payload.clone(), res_tx)
                     .await;
 
                 echo_out
@@ -316,138 +352,10 @@ where
     (incoming, outgoing)
 }
 
-struct ReceiverProxy<T> {
-    id: RoomId,
-    rx: Option<mpsc::Receiver<T>>,
-    tx: mpsc::Sender<T>,
-}
-
-impl<T> Future for ReceiverProxy<T> {
-    type Output = (RoomId, mpsc::Receiver<T>);
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.tx.is_closed() {
-            return Poll::Ready((self.id.clone(), self.rx.take().unwrap()));
-        }
-
-        match self.rx.as_mut().unwrap().try_next() {
-            Ok(Some(msg)) => {
-                self.tx.try_send(msg);
-            }
-            _ => {}
-        }
-
-        // Wake this task to be polled again.
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
-
 impl Stream for RuntimeDaemon {
     type Item = RuntimeMessage;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.from_service.poll_next_unpin(cx)
-    }
-}
-
-struct CoordinationChannel {
-    id: RoomId,
-    rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
-    pull_back: oneshot::Receiver<(u16, ProtocolAgent)>,
-}
-
-impl<T> Future for CoordinationChannel {
-    type Output = CoordinationPhase1;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.rx.as_mut().unwrap().try_next() {
-            Ok(Some(msg)) => {
-                /// todo: somehow check that we actually received `join_computation` request
-                return Poll::Ready(CoordinationPhase1::Remote {
-                    peer_id: msg.peer_index, // todo: should be PeerId !!!
-                    payload: msg.payload,
-                    response_tx: msg.pending_response,
-                    channel: JoinChannel {
-                        id: self.id.clone(),
-                        rx: self.rx.take(),
-                    },
-                });
-            }
-            _ => {}
-        }
-
-        if let Some((n, agent)) = self.pull_back.try_recv().unwrap() {
-            return Poll::Ready(CoordinationPhase1::Local {
-                id: self.id.clone(),
-                n,
-                rx: self.rx.take(),
-            });
-        }
-
-        // Wake this task to be polled again.
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
-// dude, these are session types, todo: try using dedicated library
-enum CoordinationPhase1 {
-    Remote {
-        peer_id: u16,                                   // todo: PeerId
-        payload: Vec<u8>, // for negotiation and stuff, todo: should contain protocol_id explicitly
-        response_tx: oneshot::Sender<OutgoingResponse>, // responds if negotiation is fine
-        channel: JoinChannel, // listens after it responds
-    },
-    Local {
-        id: RoomId,
-        n: u16,
-        rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
-    },
-}
-
-/// todo: this struct is the same as `CoordinationChannel` how can we implement them differently (?)
-struct JoinChannel {
-    id: RoomId,
-    rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
-}
-
-enum CoordinationPhase2 {
-    Start {
-        room_id: RoomId,
-        room_receiver: mpsc::Receiver<broadcast::IncomingMessage>, // hmm todo: maybe wrap it in the similar kind of struct (?)
-                                                                   /* protocol_id:
-                                                                   session_id: SessionId
-                                                                   n: u16
-                                                                    */
-    },
-    Abort(CoordinationChannel),
-}
-
-impl<T> Future for JoinChannel {
-    type Output = CoordinationPhase2;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.rx.as_mut().unwrap().try_next() {
-            Ok(Some(msg)) => {
-                if true
-                /* todo: some check logic here */
-                {
-                    return Poll::Ready(CoordinationPhase2::Start {
-                        room_id: self.id.clone(),
-                        room_receiver: self.rx.take().unwrap(),
-                    });
-                } else {
-                    return Poll::Ready(CoordinationPhase2::Abort(CoordinationChannel {
-                        id: self.id.clone(),
-                        rx: self.rx.take(),
-                    }));
-                }
-            }
-            _ => {}
-        }
-
-        // Wake this task to be polled again.
-        cx.waker().wake_by_ref();
-        Poll::Pending
     }
 }
