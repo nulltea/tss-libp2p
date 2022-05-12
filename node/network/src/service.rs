@@ -2,7 +2,7 @@ use crate::broadcast::{IfDisconnected, MessageContext, ProtocolConfig};
 use crate::error::Error;
 use crate::{
     behaviour::{Behaviour, BehaviourOut},
-    broadcast, config, NodeKeyConfig,
+    broadcast, config, MessageType, NodeKeyConfig,
 };
 use async_std::channel::{unbounded, Receiver, Sender};
 use futures::channel::mpsc;
@@ -33,23 +33,24 @@ pub enum NetworkEvent {
 /// Messages into the service to handle.
 #[derive(Debug)]
 pub enum NetworkMessage {
-    CrossRoundExchange {
-        session_id: u64,
+    RequestResponse {
         room_id: RoomId,
+        context: MessageContext,
         message: MessageRouting,
     },
 }
 
 #[derive(Debug)]
 pub enum MessageRouting {
-    Broadcast(
+    Multicast(
+        Vec<PeerId>,
         Vec<u8>,
-        mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+        mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
     ),
     SendDirect(
-        u16,
+        PeerId,
         Vec<u8>,
-        mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+        mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
     ),
 }
 
@@ -185,49 +186,35 @@ impl NetworkWorker {
                         let behaviour = swarm_stream.get_mut().behaviour_mut();
 
                         match request {
-                            NetworkMessage::CrossRoundExchange {
-                                session_id,
+                            NetworkMessage::RequestResponse {
                                 room_id,
-                                round_index,
+                                context,
                                 message
                             } => {
-                                let ctx = ProtoContext {
-                                    session_id,
-                                    round_index,
-                                };
 
                                 match message {
-                                    MessageRouting::Broadcast(payload, response_sender) => {
+                                    MessageRouting::Multicast(peer_ids, payload, response_sender) => {
                                         behaviour.broadcast_message(
+                                            peer_ids,
                                             payload,
                                             room_id,
-                                            ctx,
+                                            context,
                                             response_sender,
                                             IfDisconnected::ImmediateError,
                                         )
                                     }
-                                    MessageRouting::SendDirect(receiver_index, payload, response_sender) => {
-                                        if let Some(receiver_peer) = behaviour.peer_at_index(receiver_index as usize)
-                                        {
-                                            behaviour.send_message(
-                                                &receiver_peer,
-                                                payload,
-                                                room_id,
-                                                ctx,
-                                                response_sender,
-                                                IfDisconnected::ImmediateError,
-                                            )
-                                        } else {
-                                            error!("receiver at index ({receiver_index}) does not exists in the set")
-                                        }
+                                    MessageRouting::SendDirect(peer_id, payload, response_sender) => {
+                                        behaviour.send_message(
+                                            &peer_id,
+                                            payload,
+                                            room_id,
+                                            context,
+                                            response_sender,
+                                            IfDisconnected::ImmediateError,
+                                        )
                                     }
                                 }
                             }
-
-                            // match rx.await {
-                            //     Ok(_v) => continue,
-                            //     Err(e) => error!("failed to wait for response {}", e),
-                            // }
                         }
                     }
                     None => { break; }
@@ -240,45 +227,36 @@ impl NetworkWorker {
 impl NetworkService {
     pub async fn broadcast_message(
         &self,
-        session_id: u64,
-        room_id: RoomId,
+        room_id: &RoomId,
+        peer_ids: impl Iterator<Item = PeerId>,
+        context: MessageContext,
         payload: Vec<u8>,
-        response_sender: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+        response_sender: mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
     ) {
         self.to_worker
-            .send(NetworkMessage::CrossRoundExchange {
-                session_id,
-                room_id,
-                message: MessageRouting::Broadcast(payload, response_sender),
+            .send(NetworkMessage::RequestResponse {
+                room_id: room_id.clone(),
+                context,
+                message: MessageRouting::Multicast(peer_ids.collect(), payload, response_sender),
             })
             .await;
     }
 
     pub async fn send_message(
         &self,
-        session_id: u64,
-        room_id: RoomId,
-        peer_index: u16,
+        room_id: &RoomId,
+        peer_id: PeerId,
+        context: MessageContext,
         payload: Vec<u8>,
-        response_sender: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+        response_sender: mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
     ) {
         self.to_worker
-            .send(NetworkMessage::CrossRoundExchange {
-                session_id,
-                room_id,
-                message: MessageRouting::SendDirect(peer_index, payload, response_sender),
+            .send(NetworkMessage::RequestResponse {
+                room_id: room_id.clone(),
+                context,
+                message: MessageRouting::SendDirect(peer_id, payload, response_sender),
             })
             .await;
-    }
-
-    pub async fn request_computation(
-        &self,
-        room_id: &RoomId,
-        session_id: SessionId,
-        target_size: u16,
-    ) {
-        self.peerset
-            .allocate_for_session(room_id, session_id, target_size)
     }
 
     pub async fn index_in_session(
@@ -287,6 +265,10 @@ impl NetworkService {
         peer_id: PeerId,
     ) -> Result<u16, ()> {
         self.peerset.index_of_peer(session_id, peer_id)
+    }
+
+    pub fn peerset(&self) -> PeersetHandle {
+        self.peerset.clone()
     }
 
     pub fn local_peer_id(&self) -> PeerId {

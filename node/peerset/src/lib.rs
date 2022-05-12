@@ -25,9 +25,9 @@ enum Action {
     AddToPeersSet(RoomId, PeerId),
     RemoveFromPeersSet(RoomId, PeerId),
 
-    AllocateForSession(RoomId, SessionId, mpsc::Sender<Result<Vec<u8>, ()>>),
     GetPeerIndex(RoomId, PeerId, oneshot::Sender<u16>),
     GetPeerAtIndex(RoomId, u16, oneshot::Sender<PeerId>),
+    GetPeers(RoomId, oneshot::Sender<Vec<(PeerId, MembershipState)>>),
 }
 
 /// Shared handle to the peer set manager (PSM). Distributed around the code.
@@ -51,24 +51,6 @@ impl PeersetHandle {
             .unbounded_send(Action::RemoveFromPeersSet(room_id.clone(), peer_id));
     }
 
-    pub async fn allocate_for_session(
-        &self,
-        room_id: &RoomId,
-        session_id: SessionId,
-        mut target_size: u16,
-    ) {
-        let (tx, mut rx) = mpsc::channel(target_size as usize);
-
-        let _ = self
-            .tx
-            .unbounded_send(Action::AllocateForSession(room_id.clone(), session_id, tx));
-
-        while target_size != 0 {
-            let _ = rx.select_next_some().await;
-            target_size -= 1;
-        }
-    }
-
     /// Returns the index of the peer.
     pub async fn index_of_peer(self, session_id: SessionId, peer_id: PeerId) -> Result<u16, ()> {
         let (tx, rx) = oneshot::channel();
@@ -89,6 +71,17 @@ impl PeersetHandle {
         let _ = self
             .tx
             .unbounded_send(Action::GetPeerAtIndex(session_id, index, tx));
+
+        // The channel is closed only if sender refuses sending index,
+        // due to that peer not being a part of the set.
+        rx.await.map_err(|_| ())
+    }
+
+    /// Returns the index of the peer.
+    pub async fn peers(self, room_id: RoomId) -> Result<Vec<(PeerId, MembershipState)>, ()> {
+        let (tx, rx) = oneshot::channel();
+
+        let _ = self.tx.unbounded_send(Action::GetPeers(room_id, tx));
 
         // The channel is closed only if sender refuses sending index,
         // due to that peer not being a part of the set.
@@ -258,11 +251,10 @@ impl Peerset {
         }
     }
 
-    async fn alloc_for_session(
+    async fn get_known_peers(
         &mut self,
         room_id: &RoomId,
-        session_id: SessionId,
-        pending_responses: mpsc::Sender<()>,
+        pending_responses: mpsc::Sender<Vec<(PeerId, MembershipState)>>,
     ) {
         match self.data.sessions.entry(session_id) {
             Entry::Vacant(e) => {
@@ -356,7 +348,7 @@ impl Stream for Peerset {
                     self.get_peer_id(session_id, index, pending_result)
                 }
                 Action::AllocateForSession(room_id, session_id, pending_responses) => {
-                    self.alloc_for_session(&room_id, session_id, pending_responses)
+                    self.get_known_peers(&room_id, session_id, pending_responses)
                 }
             }
         }

@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use blake2::{Blake2s256, Digest};
 use futures::channel::{mpsc, oneshot};
 use futures_util::{pin_mut, select, FutureExt, SinkExt, StreamExt};
+use libp2p::PeerId;
 use log::{error, info};
 use mpc_p2p::broadcast;
 use std::cmp::Ordering;
@@ -97,9 +98,10 @@ impl EchoGadget {
             }
         }
 
+        // there's a stupid bug below, todo: this index is not peer_index
         for (index, remote_echo) in echo_hashes.into_iter().enumerate() {
             match remote_echo {
-                Ok(hash) => {
+                Ok((peer_id, hash)) => {
                     if hash != echo_hash {
                         return Err(crate::Error::InconsistentEcho(index as u16));
                     }
@@ -144,5 +146,5 @@ impl Ord for EchoMessage {
 
 pub(crate) enum EchoResponse {
     Incoming(oneshot::Sender<broadcast::OutgoingResponse>),
-    Outgoing(mpsc::Receiver<Result<Vec<u8>, broadcast::RequestFailure>>),
+    Outgoing(mpsc::Receiver<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>),
 }

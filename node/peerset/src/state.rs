@@ -81,20 +81,7 @@ impl PeersState {
         }
     }
 
-    /// Returns the list of all the peers we know of.
-    /// todo sample sorting
-    pub fn sample_peers(&self, room_id: &RoomId) -> impl Iterator<Item = PeerId> {
-        assert!(self.rooms.contains_key(&room_id));
-
-        Ok(self
-            .nodes
-            .iter()
-            .filter(move |(_, n)| n.rooms.contains_key(room_id))
-            .sorted_by_key(|(p, _)| p.to_bytes())
-            .map(|(p, _)| p.clone()))
-    }
-
-    /// Returns the index of a specified peer in a given set.
+    /// Returns the index of a specified peer in a given room.
     pub fn index_of(&self, room_id: &RoomId, peer: PeerId) -> Option<usize> {
         assert!(self.rooms.contains_key(&room_id));
 
@@ -105,7 +92,7 @@ impl PeersState {
             .position(|elem| *elem == peer)
     }
 
-    /// Returns the index of a specified peer in a given set.
+    /// Returns the index of a specified peer in a given room.
     pub fn at_index(&self, room_id: &RoomId, index: usize) -> Option<PeerId> {
         assert!(self.rooms.contains_key(&room_id));
 
@@ -118,7 +105,7 @@ impl PeersState {
             .find_map(move |(i, p)| if i == index { Some(p.clone()) } else { None })
     }
 
-    /// Returns the list of peers we are connected to in the context of the set.
+    /// Returns the list of peers we are connected to in the context of the room.
     pub fn connected_peers(&self, room_id: &RoomId) -> impl Iterator<Item = &PeerId> {
         assert!(self.rooms.contains_key(&room_id));
 
@@ -126,6 +113,16 @@ impl PeersState {
             .iter()
             .filter(move |(_, n)| n.member_of_and(room_id, |ms| ms.is_connected()))
             .map(|(p, _)| p)
+    }
+
+    /// Returns the list of peers we are know to in the context of the room.
+    pub fn known_peers(&self, room_id: &RoomId) -> impl Iterator<Item = (PeerId, MembershipState)> {
+        assert!(self.rooms.contains_key(&room_id));
+
+        self.nodes
+            .iter()
+            .filter(move |(_, n)| n.rooms.contains_key(room_id))
+            .map(|(p, n)| (p.clone(), n.rooms.get(room_id).unwrap().clone()))
     }
 }
 

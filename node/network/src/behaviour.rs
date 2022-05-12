@@ -82,7 +82,7 @@ impl Behaviour {
         message: Vec<u8>,
         room_id: RoomId,
         ctx: MessageContext,
-        pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+        pending_response: mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
         self.broadcast.send_message(
@@ -98,40 +98,20 @@ impl Behaviour {
     /// Initiates broadcasting of a message.
     pub fn broadcast_message(
         &mut self,
+        peer_ids: impl Iterator<Item = PeerId>,
         message: Vec<u8>,
         room_id: RoomId,
         ctx: MessageContext,
-        pending_response: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
+        pending_response: mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
         connect: broadcast::IfDisconnected,
     ) {
         self.broadcast.broadcast_message(
-            self.peerset.connected_peers(&room_id),
+            peer_ids,
             room_id.as_protocol_id(),
             ctx,
             message,
             pending_response,
             connect,
-        );
-    }
-
-    fn request_computation(
-        &mut self,
-        peer: &PeerId,
-        room_id: RoomId,
-        session_id: SessionId,
-        ack: mpsc::Sender<Result<Vec<u8>, broadcast::RequestFailure>>,
-    ) {
-        self.broadcast.send_message(
-            peer,
-            room_id.as_protocol_id(),
-            MessageContext {
-                message_type: MessageType::Coordination,
-                session_id: session_id.into(),
-                protocol_id: 0,
-            },
-            message, // todo
-            ack,
-            broadcast::IfDisconnected::TryConnect,
         );
     }
 

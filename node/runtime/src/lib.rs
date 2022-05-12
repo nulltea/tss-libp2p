@@ -4,6 +4,7 @@
 mod coordination;
 mod echo;
 mod error;
+mod negotiation;
 mod runtime;
 mod traits;
 

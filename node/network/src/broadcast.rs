@@ -240,8 +240,13 @@ pub struct Broadcast {
     >,
 
     /// Pending requests, passed down to a [`RequestResponse`] behaviour, awaiting a reply.
-    pending_requests:
-        HashMap<ProtocolRequestId, (Instant, mpsc::Sender<Result<Vec<u8>, RequestFailure>>)>,
+    pending_requests: HashMap<
+        ProtocolRequestId,
+        (
+            Instant,
+            mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>,
+        ),
+    >,
 
     /// Whenever an incoming request arrives, a `Future` is added to this list and will yield the
     /// start time and the response to send back to the remote.
@@ -324,7 +329,7 @@ impl Broadcast {
         protocol_id: &str,
         ctx: MessageContext,
         payload: Vec<u8>,
-        pending_response: mpsc::Sender<Result<Vec<u8>, RequestFailure>>,
+        pending_response: mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>,
         connect: IfDisconnected,
     ) {
         self.send_wire_message(
@@ -340,18 +345,18 @@ impl Broadcast {
         );
     }
 
-    pub fn broadcast_message<'a>(
+    pub fn broadcast_message(
         &mut self,
-        targets: impl Iterator<Item = &'a PeerId>,
+        targets: impl Iterator<Item = PeerId>,
         protocol_id: &str,
         ctx: MessageContext,
         payload: Vec<u8>,
-        pending_response: mpsc::Sender<Result<Vec<u8>, RequestFailure>>,
+        pending_response: mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>,
         connect: IfDisconnected,
     ) {
         for target in targets {
             self.send_wire_message(
-                target,
+                &target,
                 protocol_id,
                 WireMessage {
                     is_broadcast: true,
@@ -369,7 +374,7 @@ impl Broadcast {
         target: &PeerId,
         protocol_id: &str,
         message: WireMessage,
-        mut pending_response: mpsc::Sender<Result<Vec<u8>, RequestFailure>>,
+        mut pending_response: mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>,
         connect: IfDisconnected,
     ) {
         if let Some((protocol, _)) = self.protocols.get_mut(protocol_id) {
@@ -425,7 +430,7 @@ impl Broadcast {
 
         MultiHandler::try_from_iter(handlers).expect(
             "Protocols are in a HashMap and there can be at most one handler per protocol name, \
-			 which is the only possible error; qed",
+             which is the only possible error; qed",
         )
     }
 }
@@ -794,7 +799,11 @@ impl NetworkBehaviour for Broadcast {
                             {
                                 Some((started, mut pending_response)) => {
                                     let delivered = pending_response
-                                        .try_send(response.map_err(|()| RequestFailure::Refused))
+                                        .try_send(
+                                            response
+                                                .map(|r| (peer.clone(), r))
+                                                .map_err(|()| RequestFailure::Refused),
+                                        )
                                         .map_err(|_| RequestFailure::Obsolete);
                                     (started, delivered)
                                 }
