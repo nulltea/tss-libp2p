@@ -6,7 +6,7 @@ use async_std::stream::Interval;
 use futures::channel::{mpsc, oneshot};
 use libp2p::PeerId;
 use mpc_p2p::broadcast::IncomingMessage;
-use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService};
+use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
 use mpc_peerset::RoomId;
 use std::borrow::BorrowMut;
 use std::collections::{HashMap, HashSet};
@@ -32,6 +32,7 @@ impl NegotiationChan {
         room_rx: mpsc::Receiver<broadcast::IncomingMessage>,
         n: u16,
         service: NetworkService,
+        agent: ProtocolAgent,
     ) -> Self {
         Self {
             id: room_id,
@@ -39,7 +40,7 @@ impl NegotiationChan {
             n,
             timeout: stream::interval(Duration::from_secs(60)),
             service,
-            agent: None,
+            agent: Some(agent),
             responses: None,
             parties: Default::default(),
         }

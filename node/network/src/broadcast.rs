@@ -52,7 +52,6 @@ use crate::messages::{GenericCodec, MessageContext, WireMessage};
 use libp2p::request_response::RequestResponseCodec;
 pub use libp2p::request_response::{InboundFailure, OutboundFailure, RequestId};
 use log::error;
-use mpc_peerset::PeersetHandle;
 
 /// Configuration for a single request-response protocol.
 #[derive(Debug, Clone)]
@@ -109,7 +108,7 @@ pub struct IncomingMessage {
     /// [`ProtocolConfig::max_request_size`].
     pub payload: Vec<u8>,
 
-    /// Message send to all peers in peerset.
+    /// Message send to all peers in the room.
     pub is_broadcast: bool,
 
     /// Channel to send back the response.
@@ -261,22 +260,12 @@ pub struct Broadcast {
     /// Whenever a response is received on `pending_responses`, insert a channel to be notified
     /// when the request has been sent out.
     send_feedback: HashMap<ProtocolRequestId, oneshot::Sender<()>>,
-
-    /// Primarily used to get a reputation of a node.
-    peerset: PeersetHandle,
-
-    /// Pending message request, holds `MessageRequest` as a Future state to poll it
-    /// until we get a response from `Peerset`
-    message_wip: Option<BroadcastMessage>,
 }
 
 impl Broadcast {
     /// Creates a new behaviour. Must be passed a list of supported protocols. Returns an error if
     /// the same protocol is passed twice.
-    pub fn new(
-        list: impl Iterator<Item = ProtocolConfig>,
-        peerset: PeersetHandle,
-    ) -> Result<Self, RegisterError> {
+    pub fn new(list: impl Iterator<Item = ProtocolConfig>) -> Result<Self, RegisterError> {
         let mut protocols = HashMap::new();
         for protocol in list {
             let mut cfg = RequestResponseConfig::default();
@@ -313,8 +302,6 @@ impl Broadcast {
             pending_responses: Default::default(),
             pending_responses_arrival_time: Default::default(),
             send_feedback: Default::default(),
-            peerset,
-            message_wip: None,
         })
     }
 
@@ -573,76 +560,7 @@ impl NetworkBehaviour for Broadcast {
         cx: &mut Context,
         params: &mut impl PollParameters,
     ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
-        'poll_all: loop {
-            if let Some(message_request) = self.message_wip.take() {
-                // Now we cannot pass `BroadcastMessage` until we get the peer_index
-                let BroadcastMessage {
-                    peer,
-                    request_id,
-                    request,
-                    channel,
-                    protocol,
-                    resp_builder,
-                    mut get_peer_index,
-                } = message_request;
-
-                let peer_index = Future::poll(Pin::new(&mut get_peer_index), cx);
-                match peer_index {
-                    Poll::Pending => {
-                        // Save the state to poll it again next time.
-                        self.message_wip = Some(BroadcastMessage {
-                            peer,
-                            request_id,
-                            request,
-                            channel,
-                            protocol,
-                            resp_builder,
-                            get_peer_index,
-                        });
-                        return Poll::Pending;
-                    }
-                    Poll::Ready(result) => {
-                        let peer_index =
-                            result.expect("Message sender is not a part of our set; qed");
-
-                        let (tx, rx) = oneshot::channel();
-
-                        // Submit the request to the "response builder" passed by the user at
-                        // initialization.
-                        if let Some(mut resp_builder) = resp_builder {
-                            let _ = resp_builder.try_send(IncomingMessage {
-                                peer_id: peer,
-                                peer_index,
-                                is_broadcast: request.is_broadcast,
-                                payload: request.payload,
-                                context: request.context,
-                                pending_response: tx,
-                            });
-                        } else {
-                            debug_assert!(false, "Received message on outbound-only protocol.");
-                        }
-
-                        let protocol = Cow::from(protocol);
-                        self.pending_responses.push(Box::pin(async move {
-                            if let Ok(response) = rx.await {
-                                Some(RequestProcessingOutcome {
-                                    peer,
-                                    request_id,
-                                    protocol,
-                                    inner_channel: channel,
-                                    response,
-                                })
-                            } else {
-                                None
-                            }
-                        }));
-
-                        // This `continue` makes sure that `pending_responses` gets polled
-                        // after we have added the new element.
-                        continue 'poll_all;
-                    }
-                }
-            }
+        loop {
             // Poll to see if any response is ready to be sent back.
             while let Poll::Ready(Some(outcome)) = self.pending_responses.poll_next_unpin(cx) {
                 let RequestProcessingOutcome {
@@ -760,28 +678,37 @@ impl NetworkBehaviour for Broadcast {
                                 Instant::now(),
                             );
 
-                            let get_peer_index = self
-                                .peerset
-                                .clone()
-                                .index_of_peer(request.context.session_id.into(), peer.clone());
-                            let get_peer_index = Box::pin(get_peer_index);
+                            let (tx, rx) = oneshot::channel();
 
-                            // Save the Future-like state with params to poll `get_peer_index`
-                            // and to continue processing the request once we get the index of
-                            // the peer.
-                            self.message_wip = Some(BroadcastMessage {
-                                peer,
-                                request_id,
-                                request,
-                                channel,
-                                protocol: protocol.to_string(),
-                                resp_builder: resp_builder.clone(),
-                                get_peer_index,
-                            });
+                            // Submit the request to the "response builder" passed by the user at
+                            // initialization.
+                            if let Some(mut resp_builder) = resp_builder.clone() {
+                                let _ = resp_builder.try_send(IncomingMessage {
+                                    peer_id: peer,
+                                    peer_index,
+                                    is_broadcast: request.is_broadcast,
+                                    payload: request.payload,
+                                    context: request.context,
+                                    pending_response: tx,
+                                });
+                            } else {
+                                debug_assert!(false, "Received message on outbound-only protocol.");
+                            }
 
-                            // This `continue` makes sure that `message_request` gets polled
-                            // after we have added the new element.
-                            continue 'poll_all;
+                            let protocol = Cow::from(protocol);
+                            self.pending_responses.push(Box::pin(async move {
+                                if let Ok(response) = rx.await {
+                                    Some(RequestProcessingOutcome {
+                                        peer,
+                                        request_id,
+                                        protocol,
+                                        inner_channel: channel,
+                                        response,
+                                    })
+                                } else {
+                                    None
+                                }
+                            }));
                         }
 
                         // Received a response from a remote to one of our requests.

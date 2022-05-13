@@ -2,7 +2,7 @@ use crate::broadcast::{IfDisconnected, MessageContext, ProtocolConfig};
 use crate::error::Error;
 use crate::{
     behaviour::{Behaviour, BehaviourOut},
-    broadcast, config, MessageType, NodeKeyConfig,
+    broadcast, config, MessageType, NodeKeyConfig, RoomId,
 };
 use async_std::channel::{unbounded, Receiver, Sender};
 use futures::channel::mpsc;
@@ -15,9 +15,6 @@ use libp2p::swarm::{AddressScore, SwarmEvent};
 use libp2p::tcp::TcpConfig;
 use libp2p::{mplex, noise, Multiaddr, PeerId, Swarm, Transport};
 use log::{error, info, warn};
-use mpc_peerset::{
-    MembershipState, Peerset, PeersetConfig, PeersetHandle, RoomId, SessionId, SetConfig,
-};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::thread::sleep;
@@ -69,8 +66,6 @@ pub struct NetworkWorker {
 pub struct NetworkService {
     /// Local copy of the `PeerId` of the local node.
     local_peer_id: PeerId,
-    /// Peerset manager.
-    peerset: mpc_peerset::PeersetHandle,
     /// Channel for sending requests to worker.
     to_worker: Sender<NetworkMessage>,
 }
@@ -87,21 +82,6 @@ impl NetworkWorker {
             "🏷 Local node identity is: {}",
             local_peer_id.to_base58(),
         );
-
-        let (peerset, peerset_handle) = {
-            Peerset::from_config(PeersetConfig {
-                sets: params
-                    .rooms
-                    .iter()
-                    .map(|rc| {
-                        SetConfig::new(
-                            rc.boot_peers.iter().map(|p| p.peer_id),
-                            rc.target_size as u32,
-                        )
-                    })
-                    .collect(),
-            })
-        };
 
         let transport = {
             let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
@@ -125,7 +105,7 @@ impl NetworkWorker {
         }
 
         let behaviour = {
-            match Behaviour::new(&keypair, params.rooms, broadcast_protocols, peerset) {
+            match Behaviour::new(&keypair, params.rooms, broadcast_protocols) {
                 Ok(b) => b,
                 Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
                     return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
@@ -151,7 +131,6 @@ impl NetworkWorker {
         let service = NetworkService {
             local_peer_id,
             to_worker: network_sender_in,
-            peerset: peerset_handle,
         };
 
         Ok((worker, service))
@@ -287,18 +266,6 @@ impl NetworkService {
                 message: MessageRouting::SendDirect(peer_id, payload, response_sender),
             })
             .await;
-    }
-
-    pub async fn index_in_session(
-        &self,
-        session_id: SessionId,
-        peer_id: PeerId,
-    ) -> Result<u16, ()> {
-        self.peerset.index_of_peer(session_id, peer_id)
-    }
-
-    pub fn peerset(&self) -> PeersetHandle {
-        self.peerset.clone()
     }
 
     pub fn local_peer_id(&self) -> PeerId {

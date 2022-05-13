@@ -16,7 +16,7 @@ use futures_util::stream::{Fuse, FuturesUnordered};
 use futures_util::{future, pin_mut, select, FutureExt, SinkExt};
 use log::{error, info};
 use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
-use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService};
+use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
 use mpc_peerset::RoomId;
 use round_based::async_runtime::Error::Send;
 use round_based::{AsyncProtocol, Msg, StateMachine};

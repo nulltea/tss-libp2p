@@ -19,7 +19,6 @@ use libp2p::{
 };
 use libp2p::{kad::record::store::MemoryStore, mdns::Mdns};
 use log::{debug, error, trace, warn};
-use mpc_peerset::RoomId;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::{
@@ -34,10 +33,10 @@ use std::{
 #[derive(Debug)]
 pub enum DiscoveryOut {
     /// Event that notifies that we connected to the node with the given peer id.
-    Connected(RoomId, PeerId),
+    Connected(PeerId),
 
     /// Event that notifies that we disconnected with the node with the given peer id.
-    Disconnected(RoomId, PeerId),
+    Disconnected(PeerId),
 }
 
 /// Implementation of `NetworkBehaviour` that discovers the nodes on the network.
@@ -65,9 +64,8 @@ impl DiscoveryBehaviour {
         let mut peers = HashSet::new();
         let peer_addresses = HashMap::new();
 
-        let user_defined: Vec<(PeerId, Multiaddr)> = rooms.
-            .bootstrap_peers
-            .into_iter()
+        let user_defined: Vec<(PeerId, Multiaddr)> = rooms
+            .flat_map(|ra| ra.boot_peers)
             .filter_map(|multiaddr| {
                 let mut addr = multiaddr.to_owned();
                 if let Some(Protocol::P2p(mh)) = addr.pop() {

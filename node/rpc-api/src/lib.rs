@@ -3,7 +3,7 @@ use curv::elliptic::curves::{Point, Secp256k1};
 use futures::future::{FutureExt, TryFutureExt};
 use futures::StreamExt;
 use futures_util::SinkExt;
-use mpc_peerset::RoomId;
+use mpc_p2p::RoomId;
 use mpc_rpc::{RpcError, RpcErrorCode, RpcFuture, RpcResult};
 use mpc_tss::DKG;
 use std::fmt::{Debug, Display};
@@ -80,7 +80,7 @@ impl mpc_rpc::JsonRPCHandler for RpcApi {
         AsyncResult { rx }.boxed()
     }
 
-    fn sign(&self, room: String, _msg: Vec<u8>) -> RpcFuture<RpcResult<()>> {
+    fn sign(&self, _room: String, _msg: Vec<u8>) -> RpcFuture<RpcResult<()>> {
         let (tx, rx) = oneshot::channel();
 
         tx.send(Ok::<(), anyhow::Error>(()));

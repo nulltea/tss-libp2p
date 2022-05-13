@@ -1,9 +1,8 @@
-use crate::broadcast;
+use crate::{broadcast, RoomId};
 use anyhow::anyhow;
 use futures::channel::mpsc;
 use libp2p::identity::{ed25519, Keypair};
 use libp2p::{multiaddr, Multiaddr, PeerId};
-use mpc_peerset::RoomId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;

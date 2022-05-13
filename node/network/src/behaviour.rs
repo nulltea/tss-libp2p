@@ -1,6 +1,6 @@
 use crate::broadcast::MessageContext;
 use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
-use crate::{broadcast, MessageType, Params, RoomArgs};
+use crate::{broadcast, MessageType, Params, RoomArgs, RoomId};
 use async_std::task;
 use futures::channel::mpsc;
 use libp2p::core::connection::ConnectionId;
@@ -18,7 +18,6 @@ use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
 use libp2p::NetworkBehaviour;
 use libp2p::PeerId;
 use log::{debug, error, trace, warn};
-use mpc_peerset::{Message, Peerset, RoomId, SessionId};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
@@ -39,8 +38,6 @@ pub(crate) struct Behaviour {
 
     #[behaviour(ignore)]
     events: VecDeque<BehaviourOut>,
-    #[behaviour(ignore)]
-    peerset: Peerset,
 }
 
 pub(crate) enum BehaviourOut {
@@ -57,13 +54,9 @@ impl Behaviour {
         local_key: &Keypair,
         rooms: impl Iterator<Item = RoomArgs>,
         broadcast_protocols: Vec<broadcast::ProtocolConfig>,
-        peerset: Peerset,
     ) -> Result<Behaviour, broadcast::RegisterError> {
         Ok(Behaviour {
-            broadcast: broadcast::Broadcast::new(
-                broadcast_protocols.into_iter(),
-                peerset.get_handle(),
-            )?,
+            broadcast: broadcast::Broadcast::new(broadcast_protocols.into_iter())?,
             discovery: DiscoveryBehaviour::new(local_key.public(), rooms),
             identify: Identify::new(IdentifyConfig::new(
                 MPC_PROTOCOL_ID.into(),
@@ -71,7 +64,6 @@ impl Behaviour {
             )),
             ping: Ping::default(),
             events: VecDeque::new(),
-            peerset,
         })
     }
 
@@ -130,37 +122,12 @@ impl Behaviour {
     /// Consumes the events list when polled.
     fn poll(
         &mut self,
-        cx: &mut Context,
+        _: &mut Context,
         _: &mut impl PollParameters,
     ) -> Poll<NetworkBehaviourAction<BehaviourOut, <Self as NetworkBehaviour>::ProtocolsHandler>>
     {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
-        }
-
-        loop {
-            match futures::Stream::poll_next(Pin::new(&mut self.peerset), cx) {
-                Poll::Ready(Some(mpc_peerset::Message::Connect {
-                    peer_id,
-                    room_id,
-                    session_id,
-                    ack,
-                })) => {
-                    self.request_computation(&peer_id, room_id, session_id, ack);
-                    break;
-                }
-                Poll::Ready(Some(mpc_peerset::Message::Drop { peer_id, .. })) => {
-                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
-                        peer_id,
-                        connection: CloseConnection::All,
-                    });
-                }
-                Poll::Ready(None) => {
-                    error!(target: "sub-libp2p", "Peerset receiver stream has returned None");
-                    break;
-                }
-                Poll::Pending => break,
-            }
         }
 
         Poll::Pending
@@ -201,12 +168,8 @@ impl NetworkBehaviourEventProcess<broadcast::BroadcastOut> for Behaviour {
 impl NetworkBehaviourEventProcess<DiscoveryOut> for Behaviour {
     fn inject_event(&mut self, event: DiscoveryOut) {
         match event {
-            DiscoveryOut::Connected(room_id, peer_id) => {
-                self.peerset.incoming_connection(&room_id, &peer_id);
-            }
-            DiscoveryOut::Disconnected(room_id, peer_id) => {
-                self.peerset.closed_connection(&room_id, &peer_id);
-            }
+            DiscoveryOut::Connected(..) => {}
+            DiscoveryOut::Disconnected(..) => {}
         }
     }
 }

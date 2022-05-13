@@ -5,7 +5,7 @@ use futures::channel::{mpsc, oneshot};
 use futures_util::pin_mut;
 use libp2p::PeerId;
 use mpc_p2p::broadcast::IncomingMessage;
-use mpc_p2p::{broadcast, NetworkService};
+use mpc_p2p::{broadcast, NetworkService, RoomId};
 use mpc_peerset::RoomId;
 use std::collections::HashSet;
 use std::future::Future;

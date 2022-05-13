@@ -461,7 +461,6 @@ dependencies = [
  "cc",
  "cfg-if 1.0.0",
  "constant_time_eq",
- "digest 0.10.3",
 ]
 
 [[package]]
@@ -2749,7 +2748,6 @@ dependencies = [
  "libp2p",
  "log 0.4.16",
  "mpc-p2p",
- "mpc-peerset",
  "mpc-rpc",
  "mpc-runtime",
  "mpc-tss",
@@ -2777,7 +2775,6 @@ dependencies = [
  "log 0.4.16",
  "mpc-api",
  "mpc-p2p",
- "mpc-peerset",
  "mpc-rpc",
  "mpc-runtime",
  "mpc-tss",
@@ -2804,7 +2801,6 @@ dependencies = [
  "hex",
  "libp2p",
  "log 0.4.16",
- "mpc-peerset",
  "parity-scale-codec",
  "parking_lot 0.12.0",
  "serde",
@@ -2813,20 +2809,6 @@ dependencies = [
  "thiserror",
  "unsigned-varint 0.6.0",
  "zeroize",
-]
-
-[[package]]
-name = "mpc-peerset"
-version = "4.0.0-dev"
-dependencies = [
- "arrayvec 0.7.2",
- "blake3",
- "futures 0.3.21",
- "itertools 0.10.3",
- "libp2p",
- "log 0.4.16",
- "rand 0.7.3",
- "serde",
 ]
 
 [[package]]
@@ -2856,7 +2838,6 @@ dependencies = [
  "libp2p",
  "log 0.4.16",
  "mpc-p2p",
- "mpc-peerset",
  "multi-party-ecdsa",
  "pretty_env_logger",
  "round-based",
@@ -2879,7 +2860,6 @@ dependencies = [
  "libp2p",
  "log 0.4.16",
  "mpc-p2p",
- "mpc-peerset",
  "mpc-runtime",
  "multi-party-ecdsa",
  "pretty_env_logger",

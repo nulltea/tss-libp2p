@@ -24,7 +24,6 @@ curv-kzen = "0.9"
 multi-party-ecdsa = {git = "https://github.com/ZenGo-X/multi-party-ecdsa"}
 
 mpc-p2p = {path = "../network" }
-mpc-peerset = {path = "../peerset" }
 
 [dev-dependencies]
 round-based = { version = "0.1.4", features = ["dev"] }

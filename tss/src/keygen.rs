@@ -14,7 +14,6 @@ use std::hash::Hasher;
 use std::io::Write;
 use std::path::Path;
 
-use mpc_peerset::SessionId;
 use tokio::sync::oneshot;
 
 pub struct DKG {
@@ -32,8 +31,8 @@ impl mpc_runtime::ComputeAgent for DKG {
         Keygen::new(i, self.t, n).unwrap()
     }
 
-    fn session_id(&self) -> SessionId {
-        SessionId::from(0)
+    fn session_id(&self) -> u64 {
+        0
     }
 
     fn done(self: Box<Self>, result: anyhow::Result<LocalKey<Secp256k1>>) {

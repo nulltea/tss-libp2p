@@ -8,7 +8,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::pin_mut;
 use libp2p::PeerId;
 use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
-use mpc_p2p::{broadcast, MessageType, NetworkService};
+use mpc_p2p::{broadcast, MessageType, NetworkService, RoomId};
 use mpc_peerset::{PeersetHandle, RoomId};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -80,6 +80,7 @@ impl<T> Future for Phase1Channel {
                     self.rx.take().unwrap(),
                     n,
                     self.service.clone(),
+                    agent,
                 ),
             });
         }
@@ -127,25 +128,20 @@ impl<T> Future for Phase2Chan {
         match self.rx.as_mut().unwrap().try_next() {
             Ok(Some(msg)) => match msg.context.message_type {
                 MessageType::Coordination => {
-                    return if let Some(agent) = self.protocols.get_mut(&msg.context.protocol_id) {
-                        let peers: Vec<PeerId> =
-                            serde_ipld_dagcbor::from_slice(&*msg.payload).unwrap();
-                        let parties = Peerset::new(peers);
-                        let (proxy, rx) = ReceiverProxy::new(
-                            self.id.clone(),
-                            self.rx.take().unwrap(),
-                            self.service.clone(),
-                            parties.c,
-                        );
-                        Poll::Ready(Phase2Msg::Start {
-                            room_id: self.id.clone(),
-                            room_receiver: rx,
-                            receiver_proxy: proxy,
-                            parties,
-                        })
-                    } else {
-                        Poll::Ready(Phase2Msg::Abort(ch, tx))
-                    }
+                    let peers: Vec<PeerId> = serde_ipld_dagcbor::from_slice(&*msg.payload).unwrap();
+                    let parties = Peerset::new(peers);
+                    let (proxy, rx) = ReceiverProxy::new(
+                        self.id.clone(),
+                        self.rx.take().unwrap(),
+                        self.service.clone(),
+                        parties.c,
+                    );
+                    Poll::Ready(Phase2Msg::Start {
+                        room_id: self.id.clone(),
+                        room_receiver: rx,
+                        receiver_proxy: proxy,
+                        parties,
+                    })
                 }
                 MessageType::Computation => {
                     panic!("unexpected message type")

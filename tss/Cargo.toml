@@ -24,7 +24,6 @@ twox-hash = "1.6"
 blake2 = "0.10"
 
 mpc-p2p = { path = "../node/network" }
-mpc-peerset = { path = "../node/peerset" }
 mpc-runtime = { path = "../node/runtime" }
 
 [dev-dependencies]

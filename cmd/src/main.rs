@@ -12,10 +12,9 @@ use libp2p::PeerId;
 use log::error;
 use mpc_api::RpcApi;
 use mpc_p2p::{broadcast, NetworkWorker, NodeKeyConfig, Params, RoomArgs, Secret};
-use mpc_peerset::{Peerset, PeersetConfig, SetConfig};
 use mpc_rpc::server::JsonRPCServer;
 use mpc_runtime::RuntimeDaemon;
-use mpc_tss::{generate_config, Config};
+use mpc_tss::{generate_config, Config, DKG};
 use sha3::Digest;
 use std::borrow::Cow;
 use std::error::Error;
@@ -75,7 +74,11 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         net_worker.run().await;
     });
 
-    let (rt_worker, rt_service) = RuntimeDaemon::new(net_service, iter::once((room_id, room_rx)));
+    let (rt_worker, rt_service) = RuntimeDaemon::new(
+        net_service,
+        iter::once((room_id, room_rx)),
+        iter::once((0, DKG::new(2, "data/player_{}/key.share".to_string()))),
+    );
 
     let rt_task = task::spawn(async {
         rt_worker.run().await;
