@@ -37,6 +37,7 @@ use libp2p::{
     },
 };
 
+use futures::channel::mpsc::Sender;
 use std::ops::Add;
 use std::{
     borrow::Cow,
@@ -244,7 +245,7 @@ pub struct Broadcast {
         ProtocolRequestId,
         (
             Instant,
-            mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>,
+            Option<mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>>,
         ),
     >,
 
@@ -340,7 +341,7 @@ impl Broadcast {
                 payload,
                 context: ctx,
             },
-            pending_response,
+            Some(pending_response),
             connect,
         );
     }
@@ -351,7 +352,7 @@ impl Broadcast {
         protocol_id: &str,
         ctx: MessageContext,
         payload: Vec<u8>,
-        pending_response: mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>,
+        pending_response: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>>,
         connect: IfDisconnected,
     ) {
         for target in targets {
@@ -374,7 +375,7 @@ impl Broadcast {
         target: &PeerId,
         protocol_id: &str,
         message: WireMessage,
-        mut pending_response: mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>,
+        mut pending_response: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>>,
         connect: IfDisconnected,
     ) {
         if let Some((protocol, _)) = self.protocols.get_mut(protocol_id) {
@@ -798,13 +799,17 @@ impl NetworkBehaviour for Broadcast {
                                 .remove(&(protocol.clone(), request_id).into())
                             {
                                 Some((started, mut pending_response)) => {
-                                    let delivered = pending_response
-                                        .try_send(
-                                            response
-                                                .map(|r| (peer.clone(), r))
-                                                .map_err(|()| RequestFailure::Refused),
-                                        )
-                                        .map_err(|_| RequestFailure::Obsolete);
+                                    let delivered = match pending_response {
+                                        Some(mut tx) => tx
+                                            .try_send(
+                                                response
+                                                    .map(|r| (peer.clone(), r))
+                                                    .map_err(|()| RequestFailure::Refused),
+                                            )
+                                            .map_err(|_| RequestFailure::Obsolete),
+                                        None => Ok(()),
+                                    };
+
                                     (started, delivered)
                                 }
                                 None => {

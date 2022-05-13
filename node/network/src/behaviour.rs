@@ -102,7 +102,9 @@ impl Behaviour {
         message: Vec<u8>,
         room_id: RoomId,
         ctx: MessageContext,
-        pending_response: mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
+        pending_response: Option<
+            mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
+        >,
         connect: broadcast::IfDisconnected,
     ) {
         self.broadcast.broadcast_message(
@@ -118,6 +120,11 @@ impl Behaviour {
     /// Bootstrap Kademlia network.
     pub fn bootstrap(&mut self) -> Result<QueryId, String> {
         self.discovery.bootstrap()
+    }
+
+    /// Bootstrap Kademlia network.
+    pub fn peers(&mut self, _room_id: RoomId) -> impl Iterator<Item = PeerId> {
+        self.discovery.peers()
     }
 
     /// Consumes the events list when polled.

@@ -42,10 +42,14 @@ pub enum NetworkMessage {
 
 #[derive(Debug)]
 pub enum MessageRouting {
+    Broadcast(
+        Vec<u8>,
+        Option<mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
+    ),
     Multicast(
         Vec<PeerId>,
         Vec<u8>,
-        mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
+        Option<mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
     ),
     SendDirect(
         PeerId,
@@ -193,6 +197,16 @@ impl NetworkWorker {
                             } => {
 
                                 match message {
+                                    MessageRouting::Broadcast(payload, response_sender) => {
+                                        behaviour.broadcast_message(
+                                            behaviour.peers(room_id),
+                                            payload,
+                                            room_id,
+                                            context,
+                                            response_sender,
+                                            IfDisconnected::ImmediateError,
+                                        )
+                                    }
                                     MessageRouting::Multicast(peer_ids, payload, response_sender) => {
                                         behaviour.broadcast_message(
                                             peer_ids,
@@ -228,10 +242,26 @@ impl NetworkService {
     pub async fn broadcast_message(
         &self,
         room_id: &RoomId,
+        context: MessageContext,
+        payload: Vec<u8>,
+        response_sender: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
+    ) {
+        self.to_worker
+            .send(NetworkMessage::RequestResponse {
+                room_id: room_id.clone(),
+                context,
+                message: MessageRouting::Broadcast(payload, response_sender),
+            })
+            .await;
+    }
+
+    pub async fn multicast_message(
+        &self,
+        room_id: &RoomId,
         peer_ids: impl Iterator<Item = PeerId>,
         context: MessageContext,
         payload: Vec<u8>,
-        response_sender: mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
+        response_sender: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
     ) {
         self.to_worker
             .send(NetworkMessage::RequestResponse {

@@ -1,6 +1,7 @@
 use crate::coordination::{Phase1Channel, Phase1Msg, Phase2Msg, ReceiverProxy};
 use crate::echo::{EchoGadget, EchoMessage, EchoResponse};
-use crate::negotiation::NegotiationChan;
+use crate::negotiation::{NegotiationChan, NegotiationMsg};
+use crate::peerset::Peerset;
 use crate::traits::ComputeAgent;
 use crate::{coordination, Error, ProtocolAgent};
 use anyhow::anyhow;
@@ -15,7 +16,7 @@ use futures_util::stream::{Fuse, FuturesUnordered};
 use futures_util::{future, pin_mut, select, FutureExt, SinkExt};
 use log::{error, info};
 use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
-use mpc_p2p::{broadcast, NetworkService};
+use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService};
 use mpc_peerset::RoomId;
 use round_based::async_runtime::Error::Send;
 use round_based::{AsyncProtocol, Msg, StateMachine};
@@ -93,13 +94,10 @@ impl RuntimeDaemon {
         let daemon = service_messages.get_ref();
 
         // loop {
-        //     match network_proxies.select_next_some().await {
-        //
-        //     }
+        //     match network_proxies.select_next_some().await {}
         // }
 
         loop {
-            let self_ref = service_messages.get_ref();
             select! {
                 srv_msg = service_messages.select_next_some() => {
                     let daemon = service_messages.get_ref();
@@ -129,11 +127,9 @@ impl RuntimeDaemon {
                         channel,
                     } => {
                         let agent = match self.protocols.get_mut(&protocol_id) {
-                            Some(pa) => match pa {
-                                ProtocolAgent::Keygen(a) => Box::new(a.clone()),
-                            },
+                            Some(pa) => pa.clone_inner(),
                             None => {
-                                return;
+                                continue;
                             }
                         };
 
@@ -147,6 +143,7 @@ impl RuntimeDaemon {
                                 room_id,
                                 room_receiver,
                                 receiver_proxy,
+                                parties,
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (mut echo, echo_tx) = EchoGadget::new(n as usize);
@@ -154,6 +151,7 @@ impl RuntimeDaemon {
                                     room_id,
                                     agent,
                                     daemon.network_service.clone(),
+                                    parties,
                                     room_receiver,
                                     echo_tx,
                                     n,
@@ -165,32 +163,39 @@ impl RuntimeDaemon {
                             }
                         }
                     }
-                    coordination::Phase1Msg::FromLocal { id, n, agent, mut negotiation } => match agent {
-                        ProtocolAgent::Keygen(agent) => {
-                            negotiation.set_challenge(vec![]);
-                            let net_rx = match negotiation.await {
-                                Ok((proxy, rx)) => {
-                                    network_proxies.push(proxy);
-                                    rx
-                                }
-                                Err((phase1, rpc_tx)) => {
-                                    rooms_coordination.push(phase1);
-                                    rooms_rpc.insert(id.clone(), rpc_tx);
-                                    continue;
-                                }
-                            };
-
-                            let (mut echo, echo_tx) = EchoGadget::new(n as usize);
-                            protocol_executions.push(echo.wrap_execution(join_computation(
-                                room_id,
+                    coordination::Phase1Msg::FromLocal {
+                        id,
+                        n,
+                        mut negotiation,
+                    } => {
+                        let (agent, net_rx) = match negotiation.await {
+                            NegotiationMsg::Start {
                                 agent,
-                                daemon.network_service.clone(),
-                                net_rx,
-                                echo_tx,
-                                n,
-                            )));
-                        }
-                    },
+                                room_receiver,
+                                receiver_proxy,
+                                parties,
+                            } => {
+                                network_proxies.push(receiver_proxy);
+                                (agent, room_receiver)
+                            }
+                            Err((phase1, rpc_tx)) => {
+                                rooms_coordination.push(phase1);
+                                rooms_rpc.insert(id.clone(), rpc_tx);
+                                continue;
+                            }
+                        };
+
+                        let (mut echo, echo_tx) = EchoGadget::new(n as usize);
+                        protocol_executions.push(echo.wrap_execution(join_computation(
+                            room_id,
+                            agent.unwrap(),
+                            daemon.network_service.clone(),
+                            parties,
+                            net_rx,
+                            echo_tx,
+                            n,
+                        )));
+                    }
                 }
                 exec_res = protocol_executions.select_next_some() => match exec_res {
                     Ok(_) => {}
@@ -217,6 +222,7 @@ async fn join_computation<CA: ?Sized>(
     room_id: RoomId,
     mut agent: Box<CA>,
     network_service: NetworkService,
+    parties: Peerset,
     net_rx: mpsc::Receiver<IncomingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
     n: u16,
@@ -232,8 +238,9 @@ async fn join_computation<CA: ?Sized>(
     let state_machine = agent.construct_state(i + 1, n);
     let (incoming, outgoing) = state_replication(
         room_id,
-        network_service,
         session_id.into(),
+        network_service,
+        parties,
         net_rx,
         echo_tx,
         i,
@@ -252,8 +259,9 @@ async fn join_computation<CA: ?Sized>(
 
 fn state_replication<M>(
     room_id: RoomId,
-    network_service: NetworkService,
     session_id: u64,
+    network_service: NetworkService,
+    parties: Peerset,
     net_rx: mpsc::Receiver<IncomingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
     i: u16,
@@ -306,8 +314,13 @@ where
     });
 
     let outgoing = futures::sink::unfold(
-        (network_service.clone(), echo_tx.clone(), room_id.clone()),
-        move |(network_service, mut echo_out, room_id), message: Msg<M>| async move {
+        (
+            network_service.clone(),
+            echo_tx.clone(),
+            room_id.clone(),
+            parties,
+        ),
+        move |(network_service, mut echo_out, room_id, parties), message: Msg<M>| async move {
             info!("outgoing message to {:?}", message);
             let payload = serde_ipld_dagcbor::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
             let message_round = 1; // todo: index round somehow
@@ -317,9 +330,13 @@ where
 
                 network_service
                     .send_message(
-                        session_id,
-                        room_id.clone(),
-                        receiver_index - 1,
+                        &room_id,
+                        parties[receiver_index - 1],
+                        MessageContext {
+                            message_type: MessageType::Computation,
+                            session_id,
+                            protocol_id: 0,
+                        },
                         payload,
                         res_tx,
                     )
@@ -337,7 +354,17 @@ where
                 let (res_tx, res_rx) = mpsc::channel((n - 1) as usize);
 
                 network_service
-                    .broadcast_message(session_id, room_id.clone(), payload.clone(), res_tx)
+                    .multicast_message(
+                        &room_id,
+                        parties.clone().into_iter(),
+                        MessageContext {
+                            message_type: MessageType::Coordination,
+                            session_id,
+                            protocol_id: 0,
+                        },
+                        payload.clone(),
+                        Some(res_tx),
+                    )
                     .await;
 
                 echo_out
@@ -349,7 +376,7 @@ where
                     .await;
             }
 
-            Ok::<_, anyhow::Error>((network_service, echo_out, room_id))
+            Ok::<_, anyhow::Error>((network_service, echo_out, room_id, parties))
         },
     );
 

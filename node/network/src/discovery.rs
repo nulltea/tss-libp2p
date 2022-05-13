@@ -65,7 +65,7 @@ impl DiscoveryBehaviour {
         let mut peers = HashSet::new();
         let peer_addresses = HashMap::new();
 
-        let user_defined: Vec<(PeerId, Multiaddr)> = config
+        let user_defined: Vec<(PeerId, Multiaddr)> = rooms.
             .bootstrap_peers
             .into_iter()
             .filter_map(|multiaddr| {
