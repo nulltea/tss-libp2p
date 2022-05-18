@@ -37,7 +37,6 @@ use libp2p::{
     },
 };
 
-use futures::channel::mpsc::Sender;
 use std::ops::Add;
 use std::{
     borrow::Cow,
@@ -49,7 +48,7 @@ use std::{
 };
 
 use crate::messages::{GenericCodec, MessageContext, WireMessage};
-use libp2p::request_response::RequestResponseCodec;
+
 pub use libp2p::request_response::{InboundFailure, OutboundFailure, RequestId};
 use log::error;
 
@@ -362,7 +361,7 @@ impl Broadcast {
         target: &PeerId,
         protocol_id: &str,
         message: WireMessage,
-        mut pending_response: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>>,
+        pending_response: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), RequestFailure>>>,
         connect: IfDisconnected,
     ) {
         if let Some((protocol, _)) = self.protocols.get_mut(protocol_id) {
@@ -374,30 +373,28 @@ impl Broadcast {
                 );
                 debug_assert!(prev_req_id.is_none(), "Expect request id to be unique.");
             } else {
-                if pending_response
-                    .try_send(Err(RequestFailure::NotConnected))
-                    .is_err()
-                {
+                if let Some(mut tx) = pending_response {
+                    if tx.try_send(Err(RequestFailure::NotConnected)).is_err() {
+                        log::debug!(
+                            target: "sub-libp2p",
+                            "Not connected to peer {:?}. At the same time local \
+                             node is no longer interested in the result.",
+                            target,
+                        );
+                    };
+                }
+            }
+        } else {
+            if let Some(mut tx) = pending_response {
+                if tx.try_send(Err(RequestFailure::UnknownProtocol)).is_err() {
                     log::debug!(
                         target: "sub-libp2p",
-                        "Not connected to peer {:?}. At the same time local \
+                        "Unknown protocol {:?}. At the same time local \
                          node is no longer interested in the result.",
-                        target,
+                        protocol_id,
                     );
                 };
             }
-        } else {
-            if pending_response
-                .try_send(Err(RequestFailure::UnknownProtocol))
-                .is_err()
-            {
-                log::debug!(
-                    target: "sub-libp2p",
-                    "Unknown protocol {:?}. At the same time local \
-                     node is no longer interested in the result.",
-                    protocol_id,
-                );
-            };
         }
     }
 
@@ -685,7 +682,7 @@ impl NetworkBehaviour for Broadcast {
                             if let Some(mut resp_builder) = resp_builder.clone() {
                                 let _ = resp_builder.try_send(IncomingMessage {
                                     peer_id: peer,
-                                    peer_index,
+                                    peer_index: 0,
                                     is_broadcast: request.is_broadcast,
                                     payload: request.payload,
                                     context: request.context,
@@ -695,7 +692,7 @@ impl NetworkBehaviour for Broadcast {
                                 debug_assert!(false, "Received message on outbound-only protocol.");
                             }
 
-                            let protocol = Cow::from(protocol);
+                            let protocol = protocol.to_owned();
                             self.pending_responses.push(Box::pin(async move {
                                 if let Ok(response) = rx.await {
                                     Some(RequestProcessingOutcome {
@@ -725,7 +722,7 @@ impl NetworkBehaviour for Broadcast {
                                 .pending_requests
                                 .remove(&(protocol.clone(), request_id).into())
                             {
-                                Some((started, mut pending_response)) => {
+                                Some((started, pending_response)) => {
                                     let delivered = match pending_response {
                                         Some(mut tx) => tx
                                             .try_send(
@@ -771,18 +768,21 @@ impl NetworkBehaviour for Broadcast {
                                 .pending_requests
                                 .remove(&(protocol.clone(), request_id).into())
                             {
-                                Some((started, mut pending_response)) => {
-                                    if pending_response
-                                        .try_send(Err(RequestFailure::Network(error.clone())))
-                                        .is_err()
-                                    {
-                                        log::debug!(
-                                            target: "sub-libp2p",
-                                            "Request with id {:?} failed. At the same time local \
-                                             node is no longer interested in the result.",
-                                            request_id,
-                                        );
+                                Some((started, pending_response)) => {
+                                    if let Some(mut tx) = pending_response {
+                                        if tx
+                                            .try_send(Err(RequestFailure::Network(error.clone())))
+                                            .is_err()
+                                        {
+                                            log::debug!(
+                                                target: "sub-libp2p",
+                                                "Request with id {:?} failed. At the same time local \
+                                                 node is no longer interested in the result.",
+                                                request_id,
+                                            );
+                                        }
                                     }
+
                                     started
                                 }
                                 None => {

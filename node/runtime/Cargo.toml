@@ -19,6 +19,8 @@ serde_ipld_dagcbor = "0.1.2"
 round-based = { version = "0.1.4" }
 pretty_env_logger = "0.4.0"
 blake2 = "0.10"
+itertools = "0.10"
+async-trait = "0.1.53"
 
 curv-kzen = "0.9"
 multi-party-ecdsa = {git = "https://github.com/ZenGo-X/multi-party-ecdsa"}

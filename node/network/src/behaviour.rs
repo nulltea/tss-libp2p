@@ -1,28 +1,25 @@
-use crate::broadcast::MessageContext;
 use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
-use crate::{broadcast, MessageType, Params, RoomArgs, RoomId};
-use async_std::task;
+use crate::{broadcast, MessageContext, Params, RoomId};
+
 use futures::channel::mpsc;
-use libp2p::core::connection::ConnectionId;
+
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::identity::Keypair;
-use libp2p::kad::store::MemoryStore;
-use libp2p::kad::{
-    Kademlia, KademliaConfig, KademliaEvent, PeerRecord, QueryId, QueryResult, Record,
-};
-use libp2p::mdns::{Mdns, MdnsEvent};
+
+use libp2p::kad::QueryId;
+
 use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess};
-use libp2p::swarm::toggle::Toggle;
-use libp2p::swarm::{CloseConnection, DialPeerCondition, NetworkBehaviourEventProcess};
+
+use libp2p::swarm::NetworkBehaviourEventProcess;
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
 use libp2p::NetworkBehaviour;
 use libp2p::PeerId;
-use log::{debug, error, trace, warn};
-use smallvec::SmallVec;
+use log::{debug, trace};
+
 use std::borrow::Cow;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::pin::Pin;
+
+use std::collections::VecDeque;
+
 use std::task::{Context, Poll};
 
 const MPC_PROTOCOL_ID: &str = "/mpc/0.1.0";
@@ -45,19 +42,19 @@ pub(crate) enum BehaviourOut {
         /// Peer which sent us a message.
         peer: PeerId,
         /// Protocol name of the request.
-        room_id: Cow<'static, str>,
+        protocol: Cow<'static, str>,
     },
 }
 
 impl Behaviour {
     pub fn new(
         local_key: &Keypair,
-        rooms: impl Iterator<Item = RoomArgs>,
         broadcast_protocols: Vec<broadcast::ProtocolConfig>,
+        params: Params,
     ) -> Result<Behaviour, broadcast::RegisterError> {
         Ok(Behaviour {
             broadcast: broadcast::Broadcast::new(broadcast_protocols.into_iter())?,
-            discovery: DiscoveryBehaviour::new(local_key.public(), rooms),
+            discovery: DiscoveryBehaviour::new(local_key.public(), params),
             identify: Identify::new(IdentifyConfig::new(
                 MPC_PROTOCOL_ID.into(),
                 local_key.public(),
@@ -79,7 +76,7 @@ impl Behaviour {
     ) {
         self.broadcast.send_message(
             peer,
-            room_id.as_protocol_id(),
+            &room_id.as_protocol_id(),
             ctx,
             message,
             pending_response,
@@ -101,7 +98,7 @@ impl Behaviour {
     ) {
         self.broadcast.broadcast_message(
             peer_ids,
-            room_id.as_protocol_id(),
+            &room_id.as_protocol_id(),
             ctx,
             message,
             pending_response,
@@ -114,9 +111,9 @@ impl Behaviour {
         self.discovery.bootstrap()
     }
 
-    /// Bootstrap Kademlia network.
-    pub fn peers(&mut self, _room_id: RoomId) -> impl Iterator<Item = PeerId> {
-        self.discovery.peers()
+    /// Known peers.
+    pub fn peers(&self, _room_id: RoomId) -> impl Iterator<Item = PeerId> {
+        self.discovery.peers().clone().into_iter()
     }
 
     /// Consumes the events list when polled.
@@ -142,10 +139,8 @@ impl NetworkBehaviourEventProcess<broadcast::BroadcastOut> for Behaviour {
                 protocol,
                 result: _,
             } => {
-                self.events.push_back(BehaviourOut::InboundMessage {
-                    peer,
-                    room_id: protocol,
-                });
+                self.events
+                    .push_back(BehaviourOut::InboundMessage { peer, protocol });
             }
             broadcast::BroadcastOut::BroadcastFinished {
                 peer,

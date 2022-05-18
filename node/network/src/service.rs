@@ -1,24 +1,21 @@
-use crate::broadcast::{IfDisconnected, MessageContext, ProtocolConfig};
+use crate::broadcast::IfDisconnected;
 use crate::error::Error;
 use crate::{
     behaviour::{Behaviour, BehaviourOut},
-    broadcast, config, MessageType, NodeKeyConfig, RoomId,
+    broadcast, MessageContext, NodeKeyConfig, RoomId,
 };
 use async_std::channel::{unbounded, Receiver, Sender};
 use futures::channel::mpsc;
 use futures::select;
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
-use libp2p::identify::{Identify, IdentifyConfig};
+
 use libp2p::noise::NoiseConfig;
-use libp2p::swarm::{AddressScore, SwarmEvent};
+use libp2p::swarm::SwarmEvent;
 use libp2p::tcp::TcpConfig;
-use libp2p::{mplex, noise, Multiaddr, PeerId, Swarm, Transport};
-use log::{error, info, warn};
+use libp2p::{mplex, noise, PeerId, Swarm, Transport};
+use log::{info, warn};
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
-use std::thread::sleep;
-use std::time::Duration;
 
 /// Events emitted by this Service.
 #[allow(clippy::large_enum_variant)]
@@ -97,15 +94,15 @@ impl NetworkWorker {
 
         let mut broadcast_protocols = vec![];
 
-        for rc in params.rooms {
-            let protocol_id = Cow::Owned(rc.id.as_protocol_id());
+        for rc in params.rooms.clone() {
+            let protocol_id = Cow::Owned(rc.id.as_protocol_id().to_string());
             let proto_cfg = broadcast::ProtocolConfig::new(protocol_id, rc.inbound_queue);
 
             broadcast_protocols.push(proto_cfg);
         }
 
         let behaviour = {
-            match Behaviour::new(&keypair, params.rooms, broadcast_protocols) {
+            match Behaviour::new(&keypair, broadcast_protocols, params.clone()) {
                 Ok(b) => b,
                 Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
                     return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
@@ -116,8 +113,8 @@ impl NetworkWorker {
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
         // Listen on the addresses.
-        if let Err(err) = swarm.listen_on(params.network_config.listen_address) {
-            warn!(target: "sub-libp2p", "Can't listen on {} because: {:?}", params.network_config.listen_address, err)
+        if let Err(err) = swarm.listen_on(params.listen_address) {
+            warn!(target: "sub-libp2p", "Can't listen on 'listen_address' because: {:?}", err)
         }
 
         let (network_sender_in, network_receiver_in) = unbounded();
@@ -155,10 +152,10 @@ impl NetworkWorker {
                             info!("Inbound message from {:?} related to {:?} protocol", peer, protocol);
                         },
                         SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {:?}", address),
-                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                        SwarmEvent::ConnectionEstablished { peer_id: _, .. } => {
 
                         },
-                        SwarmEvent::ConnectionClosed { peer_id, .. } => { }
+                        SwarmEvent::ConnectionClosed { peer_id: _, .. } => { }
                         _ => continue
                     }
                     None => { break; }
@@ -188,7 +185,7 @@ impl NetworkWorker {
                                     }
                                     MessageRouting::Multicast(peer_ids, payload, response_sender) => {
                                         behaviour.broadcast_message(
-                                            peer_ids,
+                                            peer_ids.into_iter(),
                                             payload,
                                             room_id,
                                             context,
@@ -251,6 +248,23 @@ impl NetworkService {
             .await;
     }
 
+    pub async fn multicast_message_owned(
+        self,
+        room_id: RoomId,
+        peer_ids: impl Iterator<Item = PeerId>,
+        context: MessageContext,
+        payload: Vec<u8>,
+        response_sender: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
+    ) {
+        self.to_worker
+            .send(NetworkMessage::RequestResponse {
+                room_id,
+                context,
+                message: MessageRouting::Multicast(peer_ids.collect(), payload, response_sender),
+            })
+            .await;
+    }
+
     pub async fn send_message(
         &self,
         room_id: &RoomId,
@@ -262,6 +276,23 @@ impl NetworkService {
         self.to_worker
             .send(NetworkMessage::RequestResponse {
                 room_id: room_id.clone(),
+                context,
+                message: MessageRouting::SendDirect(peer_id, payload, response_sender),
+            })
+            .await;
+    }
+
+    pub async fn send_message_owned(
+        self,
+        room_id: RoomId,
+        peer_id: PeerId,
+        context: MessageContext,
+        payload: Vec<u8>,
+        response_sender: mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>,
+    ) {
+        self.to_worker
+            .send(NetworkMessage::RequestResponse {
+                room_id,
                 context,
                 message: MessageRouting::SendDirect(peer_id, payload, response_sender),
             })

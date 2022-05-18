@@ -22,6 +22,7 @@ curv-kzen = "0.9"
 pretty_env_logger = "0.4.0"
 twox-hash = "1.6"
 blake2 = "0.10"
+async-trait = "0.1.53"
 
 mpc-p2p = { path = "../node/network" }
 mpc-runtime = { path = "../node/runtime" }

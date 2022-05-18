@@ -1,16 +1,15 @@
 use crate::negotiation::NegotiationChan;
 use crate::network_proxy::ReceiverProxy;
 use crate::peerset::Peerset;
-use crate::ProtocolAgent;
+use crate::ComputeAgentAsync;
 use async_std::stream;
-use async_std::stream::{interval, Interval};
+use async_std::stream::Interval;
 use futures::channel::{mpsc, oneshot};
-use futures::pin_mut;
+use futures::Stream;
 use libp2p::PeerId;
-use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
+use mpc_p2p::broadcast::OutgoingResponse;
 use mpc_p2p::{broadcast, MessageType, NetworkService, RoomId};
-use mpc_peerset::{PeersetHandle, RoomId};
-use std::collections::{HashMap, HashSet};
+
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -19,7 +18,7 @@ use std::time::Duration;
 pub(crate) struct Phase1Channel {
     id: RoomId,
     rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
-    on_local_rpc: oneshot::Receiver<(u16, ProtocolAgent)>,
+    on_local_rpc: oneshot::Receiver<(u16, Box<dyn ComputeAgentAsync>)>,
     service: NetworkService,
 }
 
@@ -28,7 +27,7 @@ impl Phase1Channel {
         room_id: RoomId,
         room_rx: mpsc::Receiver<broadcast::IncomingMessage>,
         service: NetworkService,
-    ) -> (Self, oneshot::Sender<(u16, ProtocolAgent)>) {
+    ) -> (Self, oneshot::Sender<(u16, Box<dyn ComputeAgentAsync>)>) {
         let (tx, rx) = oneshot::channel();
         (
             Self {
@@ -42,7 +41,7 @@ impl Phase1Channel {
     }
 }
 
-impl<T> Future for Phase1Channel {
+impl Future for Phase1Channel {
     type Output = Phase1Msg;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -60,7 +59,6 @@ impl<T> Future for Phase1Channel {
                             rx: self.rx.take(),
                             timeout: stream::interval(Duration::from_secs(15)),
                             service: self.service.clone(),
-                            agent: None,
                         },
                     });
                 }
@@ -107,41 +105,46 @@ pub(crate) enum Phase1Msg {
     },
 }
 
-struct Phase2Chan {
+pub(crate) struct Phase2Chan {
     id: RoomId,
     rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
     timeout: Interval,
     service: NetworkService,
-    agent: Option<ProtocolAgent>,
 }
 
 impl Phase2Chan {
-    pub fn inject_agent(&mut self, a: ProtocolAgent) {
-        self.agent.insert(a);
+    pub fn abort(
+        mut self,
+    ) -> (
+        RoomId,
+        Phase1Channel,
+        oneshot::Sender<(u16, Box<dyn ComputeAgentAsync>)>,
+    ) {
+        let (ch, tx) = Phase1Channel::new(self.id.clone(), self.rx.take().unwrap(), self.service);
+        return (self.id, ch, tx);
     }
 }
 
-impl<T> Future for Phase2Chan {
+impl Future for Phase2Chan {
     type Output = Phase2Msg;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.rx.as_mut().unwrap().try_next() {
             Ok(Some(msg)) => match msg.context.message_type {
                 MessageType::Coordination => {
-                    let peers: Vec<PeerId> = serde_ipld_dagcbor::from_slice(&*msg.payload).unwrap();
-                    let parties = Peerset::new(peers);
+                    let parties = Peerset::from_bytes(&*msg.payload);
                     let (proxy, rx) = ReceiverProxy::new(
                         self.id.clone(),
                         self.rx.take().unwrap(),
                         self.service.clone(),
-                        parties.c,
+                        parties.clone(),
                     );
-                    Poll::Ready(Phase2Msg::Start {
+                    return Poll::Ready(Phase2Msg::Start {
                         room_id: self.id.clone(),
                         room_receiver: rx,
                         receiver_proxy: proxy,
                         parties,
-                    })
+                    });
                 }
                 MessageType::Computation => {
                     panic!("unexpected message type")
@@ -151,13 +154,13 @@ impl<T> Future for Phase2Chan {
         }
 
         // Remote peer gone offline or refused taking in us in set - returning to Phase 1
-        if self.timeout.poll_next(cx).is_ready() {
+        if Stream::poll_next(Pin::new(&mut self.timeout), cx).is_ready() {
             let (ch, tx) = Phase1Channel::new(
                 self.id.clone(),
                 self.rx.take().unwrap(),
                 self.service.clone(),
             );
-            return Poll::Ready(Phase2Msg::Abort(ch, tx));
+            return Poll::Ready(Phase2Msg::Abort(self.id.clone(), ch, tx));
         }
 
         // Wake this task to be polled again.
@@ -173,5 +176,9 @@ pub(crate) enum Phase2Msg {
         receiver_proxy: ReceiverProxy,
         parties: Peerset,
     },
-    Abort(Phase1Channel, oneshot::Sender<(u16, ProtocolAgent)>),
+    Abort(
+        RoomId,
+        Phase1Channel,
+        oneshot::Sender<(u16, Box<dyn ComputeAgentAsync>)>,
+    ),
 }

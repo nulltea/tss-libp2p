@@ -271,9 +271,9 @@ checksum = "30696a84d817107fc028e049980e09d5e140e8da8f1caeb17e8e950658a3cea9"
 
 [[package]]
 name = "async-trait"
-version = "0.1.52"
+version = "0.1.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "061a7acccaa286c011ddc30970520b98fa40e00c9d644633fb26b5fc63a265e3"
+checksum = "ed6aa3524a2dfcf9fe180c51eae2b58738348d819517ceadf95789c51fff7600"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -461,6 +461,7 @@ dependencies = [
  "cc",
  "cfg-if 1.0.0",
  "constant_time_eq",
+ "digest 0.10.3",
 ]
 
 [[package]]
@@ -2793,8 +2794,10 @@ name = "mpc-p2p"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrayvec 0.7.2",
  "async-std",
  "async-trait",
+ "blake3",
  "derive_more",
  "futures 0.3.21",
  "futures-util",
@@ -2831,10 +2834,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-std",
+ "async-trait",
  "blake2 0.10.4",
  "curv-kzen",
  "futures 0.3.21",
  "futures-util",
+ "itertools 0.10.3",
  "libp2p",
  "log 0.4.16",
  "mpc-p2p",
@@ -2853,6 +2858,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-std",
+ "async-trait",
  "blake2 0.10.4",
  "curv-kzen",
  "futures 0.3.21",

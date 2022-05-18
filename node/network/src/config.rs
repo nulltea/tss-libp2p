@@ -4,7 +4,7 @@ use futures::channel::mpsc;
 use libp2p::identity::{ed25519, Keypair};
 use libp2p::{multiaddr, Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+
 use std::error::Error;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,7 @@ pub struct Params {
     pub rooms: Vec<RoomArgs>,
 }
 
+#[derive(Clone)]
 pub struct RoomArgs {
     pub id: RoomId,
 

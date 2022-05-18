@@ -1,4 +1,3 @@
-use crate::broadcast::{MessageContext, MessageType};
 use futures::prelude::*;
 use libp2p::request_response::RequestResponseCodec;
 use std::io;
@@ -16,8 +15,9 @@ pub struct MessageContext {
     pub protocol_id: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum MessageType {
-    Coordination = 1,
+    Coordination = 0,
     Computation,
 }
 
@@ -44,10 +44,16 @@ impl RequestResponseCodec for GenericCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let message_type: MessageType = unsigned_varint::aio::read_u8(&mut io)
+        let message_type = match unsigned_varint::aio::read_u8(&mut io)
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?
-            .into();
+        {
+            0 => MessageType::Coordination,
+            1 => MessageType::Computation,
+            _ => {
+                panic!("unknown messages type");
+            }
+        };
 
         let is_broadcast = unsigned_varint::aio::read_u8(&mut io)
             .await
@@ -57,7 +63,7 @@ impl RequestResponseCodec for GenericCodec {
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
-        let protocol_id = unsigned_varint::aio::rea(&mut io)
+        let protocol_id = unsigned_varint::aio::read_u64(&mut io)
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
@@ -87,7 +93,7 @@ impl RequestResponseCodec for GenericCodec {
                 protocol_id,
             },
             payload: buffer,
-            is_broadcast: is_broadcast.into(),
+            is_broadcast: is_broadcast != 0,
         })
     }
 
@@ -165,11 +171,11 @@ impl RequestResponseCodec for GenericCodec {
             .await?;
         }
 
-        // Write round_index
+        // Write protocol_id
         {
-            let mut buffer = unsigned_varint::encode::u16_buffer();
-            io.write_all(unsigned_varint::encode::u16(
-                req.context.round_index,
+            let mut buffer = unsigned_varint::encode::u64_buffer();
+            io.write_all(unsigned_varint::encode::u64(
+                req.context.protocol_id,
                 &mut buffer,
             ))
             .await?;

@@ -1,39 +1,33 @@
-use crate::coordination::{Phase1Channel, Phase1Msg, Phase2Msg, ReceiverProxy};
+use crate::coordination::Phase2Msg;
 use crate::echo::{EchoGadget, EchoMessage, EchoResponse};
-use crate::negotiation::{NegotiationChan, NegotiationMsg};
+use crate::negotiation::NegotiationMsg;
 use crate::peerset::Peerset;
-use crate::traits::ComputeAgent;
-use crate::{coordination, Error, ProtocolAgent};
+
+use crate::{coordination, ComputeAgentAsync, MessageRouting, ProtocolAgentFactory};
 use anyhow::anyhow;
 use async_std::prelude::Stream;
 use async_std::task;
 use blake2::Digest;
-use futures::channel::mpsc::{Receiver, TryRecvError};
-use futures::channel::oneshot::Sender;
+
 use futures::channel::{mpsc, oneshot};
-use futures::{Sink, StreamExt};
-use futures_util::stream::{Fuse, FuturesUnordered};
-use futures_util::{future, pin_mut, select, FutureExt, SinkExt};
+use futures::StreamExt;
+
+use futures_util::stream::{FuturesOrdered, FuturesUnordered};
+use futures_util::{select, FutureExt, SinkExt};
 use log::{error, info};
 use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
 use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
-use mpc_peerset::RoomId;
-use round_based::async_runtime::Error::Send;
-use round_based::{AsyncProtocol, Msg, StateMachine};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use std::borrow::{Borrow, BorrowMut, Cow};
+
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt::Debug;
-use std::fmt::Display;
+
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, LockResult, Mutex, RwLock};
+
 use std::task::{Context, Poll};
 
 pub enum RuntimeMessage {
-    JoinComputation(RoomId, u16, ProtocolAgent),
+    JoinComputation(RoomId, u16, u64, oneshot::Sender<anyhow::Result<Vec<u8>>>),
 }
 
 #[derive(Clone)]
@@ -42,25 +36,36 @@ pub struct RuntimeService {
 }
 
 impl RuntimeService {
-    pub async fn join_computation(&mut self, room_id: RoomId, n: u16, agent: ProtocolAgent) {
+    pub async fn join_computation(
+        &mut self,
+        room_id: RoomId,
+        n: u16,
+        protocol_id: u64,
+        done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
+    ) {
         self.to_runtime
-            .send(RuntimeMessage::JoinComputation(room_id, n, agent))
+            .send(RuntimeMessage::JoinComputation(
+                room_id,
+                n,
+                protocol_id,
+                done,
+            ))
             .await;
     }
 }
 
-pub struct RuntimeDaemon {
+pub struct RuntimeDaemon<TFactory> {
     network_service: NetworkService,
     rooms: HashMap<RoomId, mpsc::Receiver<broadcast::IncomingMessage>>,
-    protocols: HashMap<u64, ProtocolAgent>,
+    agents_factory: TFactory,
     from_service: mpsc::Receiver<RuntimeMessage>,
 }
 
-impl RuntimeDaemon {
+impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
     pub fn new(
         network_service: NetworkService,
         rooms: impl Iterator<Item = (RoomId, mpsc::Receiver<broadcast::IncomingMessage>)>,
-        protocols: impl Iterator<Item = (u64, ProtocolAgent)>,
+        agents_factory: TFactory,
     ) -> (Self, RuntimeService) {
         let (tx, rx) = mpsc::channel(2);
 
@@ -68,7 +73,7 @@ impl RuntimeDaemon {
             network_service,
             rooms: rooms.collect(),
             from_service: rx,
-            protocols: protocols.collect(),
+            agents_factory,
         };
 
         let service = RuntimeService { to_runtime: tx };
@@ -76,42 +81,57 @@ impl RuntimeDaemon {
         (worker, service)
     }
 
-    pub async fn run(mut self) {
-        let mut service_messages = self.fuse();
+    pub async fn run(self) {
         let mut protocol_executions = FuturesUnordered::new();
         let mut network_proxies = FuturesUnordered::new();
-
         let mut rooms_coordination = FuturesUnordered::new();
-        let mut rooms_rpc = HashMap::default();
+        let mut rooms_rpc = HashMap::new();
 
-        for (room_id, rx) in self.rooms.into_iter() {
+        let Self {
+            network_service,
+            rooms,
+            agents_factory,
+            from_service,
+        } = self;
+
+        for (room_id, rx) in rooms.into_iter() {
             let (ch, tx) =
-                coordination::Phase1Channel::new(room_id.clone(), rx, self.network_service.clone());
+                coordination::Phase1Channel::new(room_id.clone(), rx, network_service.clone());
             rooms_coordination.push(ch);
             rooms_rpc.insert(room_id, tx);
         }
 
-        let daemon = service_messages.get_ref();
+        let mut service_messages = from_service.fuse();
 
         // loop {
-        //     match network_proxies.select_next_some().await {}
+        //     match rooms_coordination.select_next_some().await
         // }
 
         loop {
             select! {
                 srv_msg = service_messages.select_next_some() => {
-                    let daemon = service_messages.get_ref();
-
                     match srv_msg {
-                        RuntimeMessage::JoinComputation(room_id, n, pa) => {
+                        RuntimeMessage::JoinComputation(room_id, n, protocol_id, done) => {
                             match rooms_rpc.entry(room_id) {
                                 Entry::Occupied(e) => {
-                                    if e.remove().send((n, pa)).is_err() {
-                                        agent.done(Err(anyhow!("protocol is busy")));
+                                    let mut agent = match agents_factory.make(protocol_id) {
+                                        Ok(a) => a,
+                                        Err(_) => {
+                                            done.send(Err(anyhow!("unknown protocol")));
+                                            continue;
+                                        }
+                                    };
+                                    let on_rpc = e.remove();
+
+                                    if on_rpc.is_canceled() {
+                                        done.send(Err(anyhow!("protocol is busy")));
+                                    } else {
+                                        agent.on_done(done);
+                                        on_rpc.send((n, agent));
                                     }
                                 }
                                 Entry::Vacant(_) => {
-                                    agent.done(Err(anyhow!("protocol is busy")));
+                                    done.send(Err(anyhow!("protocol is busy")));
                                 }
                             }
                         },
@@ -119,16 +139,19 @@ impl RuntimeDaemon {
                 },
                 coord_msg = rooms_coordination.select_next_some() => match coord_msg {
                     coordination::Phase1Msg::FromRemote {
-                        peer_id,
+                        peer_id: _,
                         protocol_id,
-                        session_id,
-                        payload,
+                        session_id: _,
+                        payload: _,
                         response_tx,
                         channel,
                     } => {
-                        let agent = match self.protocols.get_mut(&protocol_id) {
-                            Some(pa) => pa.clone_inner(),
-                            None => {
+                        let agent = match agents_factory.make(protocol_id) {
+                            Ok(a) => a,
+                            Err(_) => {
+                                let (id, ch, tx) = channel.abort();
+                                rooms_coordination.push(ch);
+                                rooms_rpc.insert(id, tx);
                                 continue;
                             }
                         };
@@ -146,19 +169,18 @@ impl RuntimeDaemon {
                                 parties,
                             } => {
                                 network_proxies.push(receiver_proxy);
-                                let (mut echo, echo_tx) = EchoGadget::new(n as usize);
-                                protocol_executions.push(echo.wrap_execution(join_computation(
+                                let (echo, echo_tx) = EchoGadget::new(parties.size());
+                                protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     room_id,
                                     agent,
-                                    daemon.network_service.clone(),
+                                    network_service.clone(),
                                     parties,
                                     room_receiver,
                                     echo_tx,
-                                    n,
                                 )));
                             }
-                            Phase2Msg::Abort(ch, tx) => {
-                                rooms_rpc.entry(room_id.clone()).and_modify(|e| *e = tx);
+                            Phase2Msg::Abort(room_id, ch, tx) => {
+                                rooms_rpc.entry(room_id).and_modify(|e| *e = tx);
                                 rooms_coordination.push(ch);
                             }
                         }
@@ -166,9 +188,9 @@ impl RuntimeDaemon {
                     coordination::Phase1Msg::FromLocal {
                         id,
                         n,
-                        mut negotiation,
+                        negotiation,
                     } => {
-                        let (agent, net_rx) = match negotiation.await {
+                        match negotiation.await {
                             NegotiationMsg::Start {
                                 agent,
                                 room_receiver,
@@ -176,34 +198,31 @@ impl RuntimeDaemon {
                                 parties,
                             } => {
                                 network_proxies.push(receiver_proxy);
-                                (agent, room_receiver)
+                                let (echo, echo_tx) = EchoGadget::new(n as usize);
+                                protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
+                                    id,
+                                    agent,
+                                    network_service.clone(),
+                                    parties,
+                                    room_receiver,
+                                    echo_tx,
+                                )));
                             }
-                            Err((phase1, rpc_tx)) => {
+                            NegotiationMsg::Abort(room_id, phase1, rpc_tx) => {
                                 rooms_coordination.push(phase1);
-                                rooms_rpc.insert(id.clone(), rpc_tx);
+                                rooms_rpc.insert(room_id, rpc_tx);
                                 continue;
                             }
                         };
-
-                        let (mut echo, echo_tx) = EchoGadget::new(n as usize);
-                        protocol_executions.push(echo.wrap_execution(join_computation(
-                            room_id,
-                            agent.unwrap(),
-                            daemon.network_service.clone(),
-                            parties,
-                            net_rx,
-                            echo_tx,
-                            n,
-                        )));
                     }
-                }
+                },
                 exec_res = protocol_executions.select_next_some() => match exec_res {
                     Ok(_) => {}
                     Err(e) => {error!("error during computation: {e}")}
                 },
-                (phase1, rpc_tx) = network_proxies.select_next_some() => {
+                (room_id, phase1, rpc_tx) = network_proxies.select_next_some() => {
                     rooms_coordination.push(phase1);
-                    rooms_rpc.insert(id.clone(), rpc_tx);
+                    rooms_rpc.insert(room_id, rpc_tx);
                 }
             }
 
@@ -218,175 +237,202 @@ impl RuntimeDaemon {
     }
 }
 
-async fn join_computation<CA: ?Sized>(
-    room_id: RoomId,
-    mut agent: Box<CA>,
-    network_service: NetworkService,
-    parties: Peerset,
-    net_rx: mpsc::Receiver<IncomingMessage>,
-    echo_tx: mpsc::Sender<EchoMessage>,
-    n: u16,
-) where
-    CA: ComputeAgent,
-    CA::StateMachine: Send + 'static,
-    <<CA as ComputeAgent>::StateMachine as StateMachine>::Err: Send + Display,
-    <<CA as ComputeAgent>::StateMachine as StateMachine>::MessageBody:
-        Serialize + DeserializeOwned + Debug,
-{
-    let session_id = agent.session_id();
-
-    let state_machine = agent.construct_state(i + 1, n);
-    let (incoming, outgoing) = state_replication(
-        room_id,
-        session_id.into(),
-        network_service,
-        parties,
-        net_rx,
-        echo_tx,
-        i,
-        n,
-    );
-    let incoming = incoming.fuse();
-    pin_mut!(incoming, outgoing);
-
-    agent.done(
-        AsyncProtocol::new(state_machine, incoming, outgoing)
-            .run()
-            .await
-            .map_err(|e| anyhow!("protocol execution terminated with error: {e}")),
-    );
+struct ProtocolExecution {
+    state: Option<ProtocolExecState>,
 }
 
-fn state_replication<M>(
+struct ProtocolExecState {
     room_id: RoomId,
     session_id: u64,
     network_service: NetworkService,
     parties: Peerset,
-    net_rx: mpsc::Receiver<IncomingMessage>,
+    from_network: mpsc::Receiver<IncomingMessage>,
+    to_protocol: mpsc::Sender<crate::IncomingMessage>,
+    from_protocol: mpsc::Receiver<crate::OutgoingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
+    agent_future: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>,
+    pending_futures: FuturesOrdered<Pin<Box<dyn Future<Output = ()> + Send>>>,
     i: u16,
     n: u16,
-) -> (
-    impl Stream<Item = Result<Msg<M>, anyhow::Error>>,
-    impl Sink<Msg<M>, Error = anyhow::Error>,
-)
-where
-    M: Serialize + DeserializeOwned + Debug,
-{
-    let mut echo_in = echo_tx.clone();
-
-    let incoming = net_rx.map(move |message: broadcast::IncomingMessage| {
-        let body: M = serde_ipld_dagcbor::from_slice(&*message.payload)
-            .map_err(|e| anyhow!("decode terminated with err: {e}"))?;
-        info!(
-            "incoming message from {} => {:?}",
-            message.peer_index + 1,
-            body
-        );
-
-        if message.is_broadcast {
-            echo_in
-                .try_send(EchoMessage {
-                    sender: message.peer_index + 1,
-                    payload: message.payload.clone(),
-                    response: EchoResponse::Incoming(message.pending_response),
-                })
-                .map_err(|_e| anyhow!("echo send expected"))?
-        } else {
-            message
-                .pending_response
-                .send(OutgoingResponse {
-                    result: Ok(vec![]),
-                    sent_feedback: None,
-                })
-                .map_err(|_e| anyhow!("acknowledgement failed with error"))?;
-        }
-
-        Ok::<_, anyhow::Error>(Msg {
-            sender: message.peer_index + 1,
-            receiver: if message.is_broadcast {
-                None
-            } else {
-                Some(i + 1)
-            },
-            body,
-        })
-    });
-
-    let outgoing = futures::sink::unfold(
-        (
-            network_service.clone(),
-            echo_tx.clone(),
-            room_id.clone(),
-            parties,
-        ),
-        move |(network_service, mut echo_out, room_id, parties), message: Msg<M>| async move {
-            info!("outgoing message to {:?}", message);
-            let payload = serde_ipld_dagcbor::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
-            let message_round = 1; // todo: index round somehow
-
-            if let Some(receiver_index) = message.receiver {
-                let (res_tx, mut res_rx) = mpsc::channel(1);
-
-                network_service
-                    .send_message(
-                        &room_id,
-                        parties[receiver_index - 1],
-                        MessageContext {
-                            message_type: MessageType::Computation,
-                            session_id,
-                            protocol_id: 0,
-                        },
-                        payload,
-                        res_tx,
-                    )
-                    .await;
-
-                // todo: handle in same Future::poll
-                task::spawn(async move {
-                    if let Err(e) = res_rx.select_next_some().await {
-                        error!("party responded with error: {e}");
-                    } else {
-                        info!("party responded");
-                    }
-                });
-            } else {
-                let (res_tx, res_rx) = mpsc::channel((n - 1) as usize);
-
-                network_service
-                    .multicast_message(
-                        &room_id,
-                        parties.clone().into_iter(),
-                        MessageContext {
-                            message_type: MessageType::Coordination,
-                            session_id,
-                            protocol_id: 0,
-                        },
-                        payload.clone(),
-                        Some(res_tx),
-                    )
-                    .await;
-
-                echo_out
-                    .send(EchoMessage {
-                        sender: message.sender,
-                        payload,
-                        response: EchoResponse::Outgoing(res_rx),
-                    })
-                    .await;
-            }
-
-            Ok::<_, anyhow::Error>((network_service, echo_out, room_id, parties))
-        },
-    );
-
-    (incoming, outgoing)
 }
 
-impl Stream for RuntimeDaemon {
-    type Item = RuntimeMessage;
+impl ProtocolExecution {
+    pub fn new(
+        room_id: RoomId,
+        agent: Box<dyn ComputeAgentAsync>,
+        network_service: NetworkService,
+        parties: Peerset,
+        from_network: mpsc::Receiver<IncomingMessage>,
+        echo_tx: mpsc::Sender<EchoMessage>,
+    ) -> Self {
+        let n = parties.size() as u16;
+        let i = parties.index_of(&network_service.local_peer_id()).unwrap();
+        let (to_protocol, from_runtime) = mpsc::channel((n - 1) as usize);
+        let (to_runtime, from_protocol) = mpsc::channel((n - 1) as usize);
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.from_service.poll_next_unpin(cx)
+        let agent_future = agent.start(n, i, from_runtime, to_runtime);
+
+        Self {
+            state: Some(ProtocolExecState {
+                room_id,
+                session_id: 0,
+                network_service,
+                parties,
+                from_network,
+                to_protocol,
+                from_protocol,
+                echo_tx,
+                agent_future,
+                pending_futures: FuturesOrdered::new(),
+                i,
+                n,
+            }),
+        }
+    }
+}
+
+impl Future for ProtocolExecution {
+    type Output = crate::Result<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let ProtocolExecState {
+            room_id,
+            session_id,
+            network_service,
+            parties,
+            mut from_network,
+            mut to_protocol,
+            mut from_protocol,
+            mut echo_tx,
+            mut agent_future,
+            mut pending_futures,
+            i,
+            n,
+        } = self.state.take().unwrap();
+
+        loop {
+            if let Poll::Pending = Stream::poll_next(Pin::new(&mut pending_futures).as_mut(), cx) {
+                break;
+            }
+        }
+
+        if let Poll::Ready(Some(message)) = Stream::poll_next(Pin::new(&mut from_network), cx) {
+            info!("incoming message from {}", message.peer_id.to_base58());
+
+            if message.is_broadcast {
+                echo_tx
+                    .try_send(EchoMessage {
+                        sender: message.peer_index + 1,
+                        payload: message.payload.clone(),
+                        response: EchoResponse::Incoming(message.pending_response),
+                    })
+                    .map_err(|_e| anyhow!("echo send expected")); // todo: error handling
+            } else {
+                message
+                    .pending_response
+                    .send(OutgoingResponse {
+                        result: Ok(vec![]),
+                        sent_feedback: None,
+                    })
+                    .map_err(|_e| anyhow!("acknowledgement failed with error"));
+                // todo: error handling
+            }
+
+            to_protocol.try_send(crate::IncomingMessage {
+                from: message.peer_index + 1,
+                to: if message.is_broadcast {
+                    MessageRouting::Broadcast
+                } else {
+                    MessageRouting::PointToPoint(i + 1)
+                },
+                body: message.payload,
+            });
+        }
+
+        if let Poll::Ready(Some(message)) = Stream::poll_next(Pin::new(&mut from_protocol), cx) {
+            info!("outgoing message to {:?}", message.to);
+            let _message_round = 1; // todo: index round somehow
+
+            match message.to {
+                MessageRouting::PointToPoint(remote_index) => {
+                    let (res_tx, mut res_rx) = mpsc::channel(1);
+
+                    pending_futures.push(
+                        network_service
+                            .clone()
+                            .send_message_owned(
+                                room_id.clone(),
+                                parties[remote_index - 1],
+                                MessageContext {
+                                    message_type: MessageType::Computation,
+                                    session_id,
+                                    protocol_id: 0,
+                                },
+                                message.body,
+                                res_tx,
+                            )
+                            .boxed(),
+                    );
+
+                    // todo: handle in same Future::poll
+                    task::spawn(async move {
+                        if let Err(e) = res_rx.select_next_some().await {
+                            error!("party responded with error: {e}");
+                        } else {
+                            info!("party responded");
+                        }
+                    });
+                }
+                MessageRouting::Broadcast => {
+                    let (res_tx, res_rx) = mpsc::channel((n - 1) as usize);
+
+                    pending_futures.push(
+                        network_service
+                            .clone()
+                            .multicast_message_owned(
+                                room_id.clone(),
+                                parties.clone().into_iter(),
+                                MessageContext {
+                                    message_type: MessageType::Coordination,
+                                    session_id,
+                                    protocol_id: 0,
+                                },
+                                message.body.clone(),
+                                Some(res_tx),
+                            )
+                            .boxed(),
+                    );
+
+                    echo_tx.try_send(EchoMessage {
+                        sender: i,
+                        payload: message.body,
+                        response: EchoResponse::Outgoing(res_rx),
+                    });
+                }
+            }
+        }
+
+        match Future::poll(Pin::new(&mut agent_future), cx) {
+            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(crate::Error::InternalError(e))),
+            Poll::Pending => {
+                self.state.insert(ProtocolExecState {
+                    room_id,
+                    session_id,
+                    network_service,
+                    parties,
+                    from_network,
+                    to_protocol,
+                    from_protocol,
+                    echo_tx,
+                    agent_future,
+                    pending_futures,
+                    i,
+                    n,
+                });
+
+                Poll::Pending
+            }
+        }
     }
 }

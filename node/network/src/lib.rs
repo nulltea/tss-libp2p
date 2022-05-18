@@ -11,6 +11,9 @@ mod service;
 pub use self::config::*;
 pub use self::messages::*;
 pub use self::service::*;
+use std::borrow::Cow;
+
+use arrayvec::ArrayString;
 
 /// The maximum allowed number of established connections per peer.
 const MAX_CONNECTIONS_PER_PEER: usize = 2;
@@ -20,7 +23,7 @@ const MAX_CONNECTIONS_PER_PEER: usize = 2;
 pub struct RoomId(ArrayString<64>);
 
 impl RoomId {
-    pub const fn from(id: String) -> Self {
+    pub fn from(id: String) -> Self {
         Self(blake3::hash(id.as_bytes()).to_hex())
     }
 
@@ -28,7 +31,7 @@ impl RoomId {
         self.0.as_str()
     }
 
-    pub fn as_protocol_id(&self) -> &str {
-        format!("/room/{}", self.as_str()).as_str()
+    pub fn as_protocol_id(&self) -> Cow<'static, str> {
+        Cow::Owned(format!("/room/{}", self.0.to_string()))
     }
 }

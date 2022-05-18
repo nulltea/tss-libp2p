@@ -9,14 +9,14 @@ use futures::future::{FutureExt, TryFutureExt};
 use futures::StreamExt;
 use gumdrop::Options;
 use libp2p::PeerId;
-use log::error;
+
 use mpc_api::RpcApi;
-use mpc_p2p::{broadcast, NetworkWorker, NodeKeyConfig, Params, RoomArgs, Secret};
+use mpc_p2p::{NetworkWorker, NodeKeyConfig, Params, RoomArgs, Secret};
 use mpc_rpc::server::JsonRPCServer;
 use mpc_runtime::RuntimeDaemon;
-use mpc_tss::{generate_config, Config, DKG};
+use mpc_tss::{generate_config, Config, TssFactory};
 use sha3::Digest;
-use std::borrow::Cow;
+
 use std::error::Error;
 use std::{iter, process};
 
@@ -56,8 +56,11 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         .map(|p| p.network_peer.clone())
         .collect();
 
-    let (room_id, room_cfg, room_rx) =
-        RoomArgs::new_full("tss/0".to_string(), boot_peers, config.parties.len());
+    let (room_id, room_cfg, room_rx) = RoomArgs::new_full(
+        "tss/0".to_string(),
+        boot_peers.into_iter(),
+        config.parties.len(),
+    );
 
     let (net_worker, net_service) = {
         let cfg = Params {
@@ -74,11 +77,8 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         net_worker.run().await;
     });
 
-    let (rt_worker, rt_service) = RuntimeDaemon::new(
-        net_service,
-        iter::once((room_id, room_rx)),
-        iter::once((0, DKG::new(2, "data/player_{}/key.share".to_string()))),
-    );
+    let (rt_worker, rt_service) =
+        RuntimeDaemon::new(net_service, iter::once((room_id, room_rx)), TssFactory);
 
     let rt_task = task::spawn(async {
         rt_worker.run().await;
@@ -112,18 +112,7 @@ async fn keygen(args: KeygenArgs) -> anyhow::Result<()> {
         .await;
 
     let pub_key_hash = match res {
-        Ok(pub_key) => {
-            let hash = sha3::Keccak256::digest(pub_key.to_bytes(true).to_vec());
-            if matches!(pub_key_hash, Some(pk_hash) if pk_hash != hash) {
-                return Err(anyhow!(
-                    "received inconsistent public key (prev={:x}, new={:x})",
-                    pub_key_hash.unwrap(),
-                    hash
-                ));
-            } else {
-                sha3::Keccak256::digest(pub_key.to_bytes(true).to_vec())
-            }
-        }
+        Ok(pub_key) => sha3::Keccak256::digest(pub_key.to_bytes(true).to_vec()),
         Err(e) => {
             return Err(anyhow!("received error: {}", e));
         }

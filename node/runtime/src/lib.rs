@@ -16,27 +16,10 @@ pub use traits::*;
 
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen;
 
-#[derive(Clone)]
 pub enum ProtocolAgent {
-    Keygen(Box<dyn ComputeAgent<StateMachine = keygen::Keygen> + Send + Clone>),
+    Keygen(Box<dyn ComputeAgent<StateMachine = keygen::Keygen> + Send>),
 }
 
-impl ProtocolAgent {
-    pub fn unwrap<SM>(self) -> Box<dyn ComputeAgent<StateMachine = SM> + Send + Clone> {
-        match self {
-            ProtocolAgent::Keygen(a) => a,
-        }
-    }
-
-    pub fn unwrap_ref<SM>(&self) -> &Box<dyn ComputeAgent<StateMachine = SM> + Send + Clone> {
-        match self {
-            ProtocolAgent::Keygen(a) => a,
-        }
-    }
-
-    pub fn clone_inner<SM>(&mut self) -> Box<dyn ComputeAgent<StateMachine = SM> + Send + Clone> {
-        match self {
-            ProtocolAgent::Keygen(a) => Box::new(a.clone()),
-        }
-    }
+pub trait ProtocolAgentFactory {
+    fn make(&self, protocol_id: u64) -> Result<Box<dyn ComputeAgentAsync>>;
 }

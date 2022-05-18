@@ -1,15 +1,16 @@
-use crate::coordination::{Phase1Channel, Phase2Msg, ReceiverProxy};
+use crate::coordination::Phase1Channel;
+use crate::network_proxy::ReceiverProxy;
 use crate::peerset::Peerset;
-use crate::ProtocolAgent;
+use crate::ComputeAgentAsync;
 use async_std::stream;
 use async_std::stream::Interval;
 use futures::channel::{mpsc, oneshot};
+use futures::Stream;
 use libp2p::PeerId;
-use mpc_p2p::broadcast::IncomingMessage;
+
 use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
-use mpc_peerset::RoomId;
 use std::borrow::BorrowMut;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -21,9 +22,9 @@ pub(crate) struct NegotiationChan {
     n: u16,
     timeout: Interval,
     service: NetworkService,
-    agent: Option<ProtocolAgent>,
+    agent: Option<Box<dyn ComputeAgentAsync>>,
     responses: Option<mpsc::Receiver<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
-    parties: HashSet<PeerId>,
+    peers: HashSet<PeerId>,
 }
 
 impl NegotiationChan {
@@ -32,7 +33,7 @@ impl NegotiationChan {
         room_rx: mpsc::Receiver<broadcast::IncomingMessage>,
         n: u16,
         service: NetworkService,
-        agent: ProtocolAgent,
+        agent: Box<dyn ComputeAgentAsync>,
     ) -> Self {
         Self {
             id: room_id,
@@ -42,33 +43,35 @@ impl NegotiationChan {
             service,
             agent: Some(agent),
             responses: None,
-            parties: Default::default(),
+            peers: Default::default(),
         }
     }
 }
 
-impl<T> Future for NegotiationChan {
+impl Future for NegotiationChan {
     type Output = NegotiationMsg;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(rx) = self.responses.borrow_mut() {
             match rx.try_next() {
                 Ok(Some(Ok((peer_id, _)))) => {
-                    self.parties.insert(peer_id);
-                    if self.parties.len() == self.n {
-                        let agent = self.agent.unwrap().unwrap_ref();
+                    self.peers.insert(peer_id);
+                    if self.peers.len() == self.n as usize {
+                        let agent = self.agent.take().unwrap();
+                        let peers = self.peers.clone();
+                        let parties = Peerset::new(peers.clone().into_iter());
+
                         self.service.multicast_message(
                             &self.id,
-                            self.parties.clone(),
+                            peers.into_iter(),
                             MessageContext {
                                 message_type: MessageType::Coordination,
                                 session_id: agent.session_id().into(),
                                 protocol_id: 0,
                             },
-                            serde_ipld_dagcbor::to_vec(&self.parties).unwrap(),
+                            parties.to_bytes(),
                             None,
                         );
-                        let parties = Peerset::new(self.parties.into_iter());
                         let (receiver_proxy, room_receiver) = ReceiverProxy::new(
                             self.id.clone(),
                             self.rx.take().unwrap(),
@@ -86,30 +89,29 @@ impl<T> Future for NegotiationChan {
                 _ => {}
             }
         } else {
-            let agent = self.agent.unwrap().unwrap_ref();
-            let c = self.challenge.or(Some(vec![])).unwrap();
+            let agent = self.agent.as_ref().unwrap();
             let (tx, rx) = mpsc::channel((self.n - 1) as usize);
             self.service.broadcast_message(
                 &self.id,
                 MessageContext {
                     message_type: MessageType::Coordination,
-                    session_id: agent.session_id().into(),
-                    protocol_id: 0,
+                    session_id: agent.session_id(),
+                    protocol_id: agent.protocol_id(),
                 },
-                c,
+                vec![],
                 Some(tx),
             );
             self.responses.insert(rx);
         }
 
         // It took too long for peerset to be assembled  - reset to Phase 1.
-        if self.timeout.poll_next(cx).is_ready() {
+        if Stream::poll_next(Pin::new(&mut self.timeout), cx).is_ready() {
             let (ch, tx) = Phase1Channel::new(
                 self.id.clone(),
                 self.rx.take().unwrap(),
                 self.service.clone(),
             );
-            return Poll::Ready(NegotiationMsg::Abort(ch, tx));
+            return Poll::Ready(NegotiationMsg::Abort(self.id.clone(), ch, tx));
         }
 
         // Wake this task to be polled again.
@@ -120,10 +122,14 @@ impl<T> Future for NegotiationChan {
 
 pub(crate) enum NegotiationMsg {
     Start {
-        agent: ProtocolAgent,
+        agent: Box<dyn ComputeAgentAsync>,
         room_receiver: mpsc::Receiver<broadcast::IncomingMessage>,
         receiver_proxy: ReceiverProxy,
         parties: Peerset,
     },
-    Abort(Phase1Channel, oneshot::Sender<(u16, ProtocolAgent)>),
+    Abort(
+        RoomId,
+        Phase1Channel,
+        oneshot::Sender<(u16, Box<dyn ComputeAgentAsync>)>,
+    ),
 }

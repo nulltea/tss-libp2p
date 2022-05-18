@@ -1,9 +1,8 @@
-use anyhow::anyhow;
 use blake2::{Blake2s256, Digest};
 use futures::channel::{mpsc, oneshot};
 use futures_util::{pin_mut, select, FutureExt, SinkExt, StreamExt};
 use libp2p::PeerId;
-use log::{error, info};
+
 use mpc_p2p::broadcast;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -33,11 +32,12 @@ impl EchoGadget {
 
     pub async fn wrap_execution(
         mut self,
-        computation_fut: impl Future<Output = ()> + Send,
+        computation_fut: impl Future<Output = crate::Result<()>>,
     ) -> crate::Result<()> {
         let mut echo = Box::pin(self.proceed_round().fuse());
         let future = computation_fut.fuse();
         pin_mut!(future);
+
         loop {
             select! {
                 echo_res = echo => match echo_res {
@@ -48,7 +48,7 @@ impl EchoGadget {
                         return Err(e); // TODO: forgot to notify agent about error
                     }
                 },
-                comp_res = future => {
+                _comp_res = future => {
                     return Ok(());
                 }
             }
@@ -101,7 +101,7 @@ impl EchoGadget {
         // there's a stupid bug below, todo: this index is not peer_index
         for (index, remote_echo) in echo_hashes.into_iter().enumerate() {
             match remote_echo {
-                Ok((peer_id, hash)) => {
+                Ok((_peer_id, hash)) => {
                     if hash != echo_hash {
                         return Err(crate::Error::InconsistentEcho(index as u16));
                     }

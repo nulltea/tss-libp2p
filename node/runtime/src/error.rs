@@ -5,6 +5,8 @@ pub enum Error {
     Busy,
     InconsistentEcho(u16),
     EchoFailed(RequestFailure),
+    UnknownProtocol(u64),
+    InternalError(anyhow::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -17,6 +19,12 @@ impl Display for Error {
                 write!(f, "inconsistent echo broadcast caused by party: {i}")
             }
             Error::EchoFailed(e) => write!(f, "echo broadcast terminated with error: {e}"),
+            Error::UnknownProtocol(protocol_id) => {
+                write!(f, "unknown protocol with id: {protocol_id}")
+            }
+            Error::InternalError(e) => {
+                write!(f, "internal error occurred: {e}")
+            }
         }
     }
 }
