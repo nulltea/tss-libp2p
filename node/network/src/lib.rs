@@ -1,5 +1,7 @@
 #![feature(inherent_associated_types)]
 
+extern crate core;
+
 mod behaviour;
 pub mod broadcast;
 mod config;

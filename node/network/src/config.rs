@@ -112,6 +112,21 @@ impl NodeKeyConfig {
             .map(Keypair::Ed25519),
         }
     }
+
+    pub fn persist<P: AsRef<Path>>(k: Keypair, path: P) -> io::Result<()> {
+        match k {
+            Keypair::Ed25519(k) => {
+                let sk = ed25519::SecretKey::from(k);
+                let mut sk_vec = sk.as_ref().to_vec();
+                write_secret_file(path, &sk_vec)?;
+                sk_vec.zeroize();
+                Ok(())
+            }
+            _ => {
+                panic!("unsupported curve");
+            }
+        }
+    }
 }
 
 /// Address of a node, including its identity.

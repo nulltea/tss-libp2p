@@ -132,7 +132,7 @@ impl Future for Phase2Chan {
         match self.rx.as_mut().unwrap().try_next() {
             Ok(Some(msg)) => match msg.context.message_type {
                 MessageType::Coordination => {
-                    let parties = Peerset::from_bytes(&*msg.payload);
+                    let parties = Peerset::from_bytes(&*msg.payload, self.service.local_peer_id());
                     let (proxy, rx) = ReceiverProxy::new(
                         self.id.clone(),
                         self.rx.take().unwrap(),
@@ -154,7 +154,7 @@ impl Future for Phase2Chan {
         }
 
         // Remote peer gone offline or refused taking in us in set - returning to Phase 1
-        if Stream::poll_next(Pin::new(&mut self.timeout), cx).is_ready() {
+        if let Poll::Ready(Some(_)) = Stream::poll_next(Pin::new(&mut self.timeout), cx) {
             let (ch, tx) = Phase1Channel::new(
                 self.id.clone(),
                 self.rx.take().unwrap(),

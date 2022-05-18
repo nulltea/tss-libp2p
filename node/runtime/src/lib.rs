@@ -4,6 +4,7 @@
 mod coordination;
 mod echo;
 mod error;
+mod execution;
 mod negotiation;
 mod network_proxy;
 mod peerset;

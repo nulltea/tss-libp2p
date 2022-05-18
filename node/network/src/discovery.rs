@@ -18,7 +18,7 @@ use libp2p::{
     },
 };
 use libp2p::{kad::record::store::MemoryStore, mdns::Mdns};
-use log::{debug, error, trace, warn};
+use log::{debug, error, info, trace, warn};
 
 use std::collections::HashMap;
 use std::{
@@ -66,16 +66,7 @@ impl DiscoveryBehaviour {
             .rooms
             .iter()
             .flat_map(|ra| ra.boot_peers.clone())
-            .filter_map(|mwp| {
-                let mut addr = mwp.multiaddr.to_owned();
-                if let Some(Protocol::P2p(mh)) = addr.pop() {
-                    let peer_id = PeerId::from_multihash(mh).unwrap();
-                    Some((peer_id, addr))
-                } else {
-                    warn!("Could not parse bootstrap addr {}", addr);
-                    None
-                }
-            })
+            .map(|mwp| (mwp.peer_id, mwp.multiaddr))
             .collect();
 
         let kademlia_opt = {

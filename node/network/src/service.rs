@@ -180,7 +180,7 @@ impl NetworkWorker {
                                             room_id,
                                             context,
                                             response_sender,
-                                            IfDisconnected::ImmediateError,
+                                            IfDisconnected::TryConnect,
                                         )
                                     }
                                     MessageRouting::Multicast(peer_ids, payload, response_sender) => {
@@ -190,7 +190,7 @@ impl NetworkWorker {
                                             room_id,
                                             context,
                                             response_sender,
-                                            IfDisconnected::ImmediateError,
+                                            IfDisconnected::TryConnect,
                                         )
                                     }
                                     MessageRouting::SendDirect(peer_id, payload, response_sender) => {
@@ -200,7 +200,7 @@ impl NetworkWorker {
                                             room_id,
                                             context,
                                             response_sender,
-                                            IfDisconnected::ImmediateError,
+                                            IfDisconnected::TryConnect,
                                         )
                                     }
                                 }
@@ -225,6 +225,22 @@ impl NetworkService {
         self.to_worker
             .send(NetworkMessage::RequestResponse {
                 room_id: room_id.clone(),
+                context,
+                message: MessageRouting::Broadcast(payload, response_sender),
+            })
+            .await;
+    }
+
+    pub async fn broadcast_message_owned(
+        self,
+        room_id: RoomId,
+        context: MessageContext,
+        payload: Vec<u8>,
+        response_sender: Option<mpsc::Sender<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
+    ) {
+        self.to_worker
+            .send(NetworkMessage::RequestResponse {
+                room_id,
                 context,
                 message: MessageRouting::Broadcast(payload, response_sender),
             })

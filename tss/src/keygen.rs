@@ -18,6 +18,7 @@ use round_based::AsyncProtocol;
 
 use std::fs::File;
 
+use log::info;
 use std::hash::Hasher;
 use std::io::Write;
 use std::path::Path;
@@ -26,8 +27,7 @@ use mpc_runtime::{IncomingMessage, OutgoingMessage};
 
 pub struct DKG {
     t: u16,
-    p: String,
-    i: Option<u16>,
+    path: String,
     done: Option<oneshot::Sender<anyhow::Result<Vec<u8>>>>,
 }
 
@@ -66,7 +66,7 @@ impl mpc_runtime::ComputeAgentAsync for DKG {
             .map_err(|e| anyhow!("protocol execution terminated with error: {e}"))?;
 
         if let Some(tx) = self.done.take() {
-            tx.send(serde_ipld_dagcbor::to_vec(&res).map_err(|e| anyhow!("failed {e}")));
+            tx.send(serde_ipld_dagcbor::to_vec(&res.y_sum_s).map_err(|e| anyhow!("failed {e}")));
         }
 
         self.save_local_key(res);
@@ -79,19 +79,13 @@ impl DKG {
     pub fn new(t: u16, p: &str) -> Self {
         Self {
             t,
-            p: p.to_owned(),
-            i: None,
+            path: p.to_owned(),
             done: None,
         }
     }
 
     fn save_local_key(&self, local_key: LocalKey<Secp256k1>) -> anyhow::Result<Point<Secp256k1>> {
-        let _i = self
-            .i
-            .expect("party index expected to be known by this point");
-
-        let path_format = self.p.replace("{}", self.i.unwrap().to_string().as_str());
-        let path = Path::new(path_format.as_str());
+        let path = Path::new(self.path.as_str());
         let dir = path.parent().unwrap();
         std::fs::create_dir_all(dir).unwrap();
 

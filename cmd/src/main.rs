@@ -2,7 +2,7 @@
 
 mod args;
 
-use crate::args::{Command, DeployArgs, KeygenArgs, MPCArgs};
+use crate::args::{Command, DeployArgs, KeygenArgs, MPCArgs, SetupArgs};
 use anyhow::anyhow;
 use async_std::task;
 use futures::future::{FutureExt, TryFutureExt};
@@ -18,6 +18,7 @@ use mpc_tss::{generate_config, Config, TssFactory};
 use sha3::Digest;
 
 use std::error::Error;
+use std::fmt::format;
 use std::{iter, process};
 
 #[tokio::main]
@@ -33,6 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match command {
         Command::Deploy(args) => deploy(args).await?,
+        Command::Setup(args) => setup(args)?,
         Command::Keygen(args) => keygen(args).await?,
         Command::Sign(_sign_args) => println!("Sign"),
     }
@@ -40,26 +42,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn setup(args: SetupArgs) -> Result<(), anyhow::Error> {
+    generate_config(args.config_path, args.multiaddr, args.rpc_address).map(|_| ())
+}
+
 async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
     let node_key = NodeKeyConfig::Ed25519(Secret::File(args.private_key.into()).into());
-    let local_peer_id = PeerId::from(node_key.clone().into_keypair()?.public());
 
-    let config = Config::load_config("config.json").or_else(|_| generate_config(3))?;
-    let local_party = config
-        .party_by_peer_id(local_peer_id.clone())
-        .unwrap()
-        .clone();
+    let config = Config::load_config(&args.config_path)?;
+    let local_party = config.local.clone();
 
-    let boot_peers: Vec<_> = config
-        .parties
-        .iter()
-        .map(|p| p.network_peer.clone())
-        .collect();
+    let boot_peers: Vec<_> = config.boot_peers.iter().map(|p| p.clone()).collect();
 
     let (room_id, room_cfg, room_rx) = RoomArgs::new_full(
         "tss/0".to_string(),
         boot_peers.into_iter(),
-        config.parties.len(),
+        config.boot_peers.len(),
     );
 
     let (net_worker, net_service) = {
@@ -77,8 +75,13 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         net_worker.run().await;
     });
 
-    let (rt_worker, rt_service) =
-        RuntimeDaemon::new(net_service, iter::once((room_id, room_rx)), TssFactory);
+    let local_peer_id = net_service.local_peer_id();
+
+    let (rt_worker, rt_service) = RuntimeDaemon::new(
+        net_service,
+        iter::once((room_id, room_rx)),
+        TssFactory::new(format!("data/{}/key.share", local_peer_id.to_base58())),
+    );
 
     let rt_task = task::spawn(async {
         rt_worker.run().await;

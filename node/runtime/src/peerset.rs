@@ -6,23 +6,25 @@ use std::ops::Index;
 
 #[derive(Clone)]
 pub struct Peerset {
+    local_peer_id: PeerId,
     peers: Vec<PeerId>,
 }
 
 impl Peerset {
-    pub fn new(peers: impl Iterator<Item = PeerId>) -> Self {
+    pub fn new(peers: impl Iterator<Item = PeerId>, local_peer_id: PeerId) -> Self {
         Self {
+            local_peer_id,
             peers: peers.sorted_by_key(|p| p.to_bytes()).collect(),
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Self {
+    pub fn from_bytes(bytes: &[u8], local_peer_id: PeerId) -> Self {
         let mut peers = vec![];
         let mut reader = BufReader::new(bytes);
 
         loop {
-            let mut buf = [0u8; 32];
-            if matches!(reader.read(&mut buf), Ok(n) if n == 32) {
+            let mut buf = [0u8; 38];
+            if matches!(reader.read(&mut buf), Ok(n) if n == 38) {
                 peers.push(PeerId::from_bytes(&buf).unwrap())
             } else {
                 break;
@@ -30,6 +32,7 @@ impl Peerset {
         }
 
         Self {
+            local_peer_id,
             peers: peers.into_iter().sorted_by_key(|p| p.to_bytes()).collect(),
         }
     }
@@ -53,6 +56,13 @@ impl Peerset {
         }
 
         buf
+    }
+
+    pub fn remotes_iter(self) -> impl Iterator<Item = PeerId> {
+        self.peers
+            .into_iter()
+            .filter(move |p| *p != self.local_peer_id)
+            .map(|p| p.clone())
     }
 }
 

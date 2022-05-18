@@ -65,24 +65,24 @@ impl<T: DeserializeOwned + Unpin, E: Display> Future for AsyncResult<T, E> {
 
     fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
-            return match self.rx.try_recv() {
+            match self.rx.try_recv() {
                 Ok(Some(Ok(value))) => {
-                    Poll::Ready(serde_ipld_dagcbor::from_slice(&*value).map_err(|e| RpcError {
+                    return Poll::Ready(serde_ipld_dagcbor::from_slice(&*value).map_err(|e| RpcError {
                         code: RpcErrorCode::InternalError,
                         message: format!("computation finished successfully but resulted an unexpected output: {e}"),
                         data: None,
                     }))
                 }
                 Ok(Some(Err(e))) => {
-                    Poll::Ready(Err(RpcError {
+                    return Poll::Ready(Err(RpcError {
                         code: RpcErrorCode::InternalError,
                         message: format!("keygen computation terminated with err: {e}"),
                         data: None,
                     }))
                 }
-                Ok(None) => Poll::Pending,
+                Ok(None) => {},
                 Err(e) => {
-                    Poll::Ready(Err(RpcError {
+                    return Poll::Ready(Err(RpcError {
                         code: RpcErrorCode::InternalError,
                         message: format!("keygen computation terminated with err: {e}"),
                         data: None,

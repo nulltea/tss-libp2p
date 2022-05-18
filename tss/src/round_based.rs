@@ -23,7 +23,7 @@ where
             sender: msg.from,
             receiver: match msg.to {
                 MessageRouting::Broadcast => None,
-                MessageRouting::PointToPoint(i) => Some(i + 1),
+                MessageRouting::PointToPoint(i) => Some(i),
             },
             body: serde_ipld_dagcbor::from_slice(&*msg.body).unwrap(),
         })
