@@ -1,4 +1,4 @@
-use crate::negotiation::NegotiationChan;
+use crate::negotiation::{NegotiationChan, StartMsg};
 use crate::network_proxy::ReceiverProxy;
 use crate::peerset::Peerset;
 use crate::ComputeAgentAsync;
@@ -18,7 +18,7 @@ use std::time::Duration;
 pub(crate) struct Phase1Channel {
     id: RoomId,
     rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
-    on_local_rpc: oneshot::Receiver<(u16, Box<dyn ComputeAgentAsync>)>,
+    on_local_rpc: oneshot::Receiver<LocalRpcMsg>,
     service: NetworkService,
 }
 
@@ -27,7 +27,7 @@ impl Phase1Channel {
         room_id: RoomId,
         room_rx: mpsc::Receiver<broadcast::IncomingMessage>,
         service: NetworkService,
-    ) -> (Self, oneshot::Sender<(u16, Box<dyn ComputeAgentAsync>)>) {
+    ) -> (Self, oneshot::Sender<LocalRpcMsg>) {
         let (tx, rx) = oneshot::channel();
         (
             Self {
@@ -69,7 +69,7 @@ impl Future for Phase1Channel {
             _ => {}
         }
 
-        if let Some((n, agent)) = self.on_local_rpc.try_recv().unwrap() {
+        if let Some(LocalRpcMsg { n, args, agent }) = self.on_local_rpc.try_recv().unwrap() {
             return Poll::Ready(Phase1Msg::FromLocal {
                 id: self.id.clone(),
                 n,
@@ -77,6 +77,7 @@ impl Future for Phase1Channel {
                     self.id.clone(),
                     self.rx.take().unwrap(),
                     n,
+                    args,
                     self.service.clone(),
                     agent,
                 ),
@@ -113,13 +114,7 @@ pub(crate) struct Phase2Chan {
 }
 
 impl Phase2Chan {
-    pub fn abort(
-        mut self,
-    ) -> (
-        RoomId,
-        Phase1Channel,
-        oneshot::Sender<(u16, Box<dyn ComputeAgentAsync>)>,
-    ) {
+    pub fn abort(mut self) -> (RoomId, Phase1Channel, oneshot::Sender<LocalRpcMsg>) {
         let (ch, tx) = Phase1Channel::new(self.id.clone(), self.rx.take().unwrap(), self.service);
         return (self.id, ch, tx);
     }
@@ -132,7 +127,9 @@ impl Future for Phase2Chan {
         match self.rx.as_mut().unwrap().try_next() {
             Ok(Some(msg)) => match msg.context.message_type {
                 MessageType::Coordination => {
-                    let parties = Peerset::from_bytes(&*msg.payload, self.service.local_peer_id());
+                    let start_msg =
+                        StartMsg::from_bytes(msg.payload, self.service.local_peer_id()).unwrap();
+                    let parties = start_msg.parties;
                     let (proxy, rx) = ReceiverProxy::new(
                         self.id.clone(),
                         self.rx.take().unwrap(),
@@ -144,6 +141,7 @@ impl Future for Phase2Chan {
                         room_receiver: rx,
                         receiver_proxy: proxy,
                         parties,
+                        init_body: start_msg.body,
                     });
                 }
                 MessageType::Computation => {
@@ -175,10 +173,13 @@ pub(crate) enum Phase2Msg {
         room_receiver: mpsc::Receiver<broadcast::IncomingMessage>,
         receiver_proxy: ReceiverProxy,
         parties: Peerset,
+        init_body: Vec<u8>,
     },
-    Abort(
-        RoomId,
-        Phase1Channel,
-        oneshot::Sender<(u16, Box<dyn ComputeAgentAsync>)>,
-    ),
+    Abort(RoomId, Phase1Channel, oneshot::Sender<LocalRpcMsg>),
+}
+
+pub(crate) struct LocalRpcMsg {
+    n: u16,
+    args: Vec<u8>,
+    agent: Box<dyn ComputeAgentAsync>,
 }

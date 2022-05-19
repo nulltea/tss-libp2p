@@ -21,6 +21,7 @@ round-based = { version = "0.1.4" }
 curv-kzen = "0.9"
 multi-party-ecdsa = {git = "https://github.com/ZenGo-X/multi-party-ecdsa"}
 pretty_env_logger = "0.4.0"
+unsigned-varint = { version = "0.6.0"}
 
 mpc-p2p = { path = "../network" }
 mpc-rpc = { path = "../rpc" }

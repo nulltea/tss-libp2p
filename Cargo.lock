@@ -2759,6 +2759,7 @@ dependencies = [
  "serde_ipld_dagcbor",
  "serde_json",
  "tokio",
+ "unsigned-varint 0.6.0",
 ]
 
 [[package]]
@@ -2836,20 +2837,19 @@ dependencies = [
  "async-std",
  "async-trait",
  "blake2 0.10.4",
- "curv-kzen",
  "futures 0.3.21",
  "futures-util",
  "itertools 0.10.3",
  "libp2p",
  "log 0.4.16",
  "mpc-p2p",
- "multi-party-ecdsa",
  "pretty_env_logger",
  "round-based",
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",
  "tokio",
+ "unsigned-varint 0.6.0",
 ]
 
 [[package]]
@@ -2875,6 +2875,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "twox-hash",
+ "unsigned-varint 0.6.0",
 ]
 
 [[package]]

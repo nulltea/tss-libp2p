@@ -11,9 +11,9 @@ use async_std::prelude::Stream;
 use async_std::task;
 use blake2::Digest;
 
+use crate::coordination::LocalRpcMsg;
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
-
 use futures_util::stream::{FuturesOrdered, FuturesUnordered};
 use futures_util::{select, FutureExt, SinkExt};
 use log::{error, info};
@@ -29,7 +29,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 pub enum RuntimeMessage {
-    JoinComputation(RoomId, u16, u64, oneshot::Sender<anyhow::Result<Vec<u8>>>),
+    RequestComputation {
+        room_id: RoomId,
+        n: u16,
+        protocol_id: u64,
+        args: Vec<u8>,
+        done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
+    },
 }
 
 #[derive(Clone)]
@@ -38,20 +44,22 @@ pub struct RuntimeService {
 }
 
 impl RuntimeService {
-    pub async fn join_computation(
+    pub async fn request_computation(
         &mut self,
         room_id: RoomId,
         n: u16,
         protocol_id: u64,
+        args: Vec<u8>,
         done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
     ) {
         self.to_runtime
-            .send(RuntimeMessage::JoinComputation(
+            .send(RuntimeMessage::RequestComputation {
                 room_id,
                 n,
                 protocol_id,
+                args,
                 done,
-            ))
+            })
             .await;
     }
 }
@@ -113,7 +121,13 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
             select! {
                 srv_msg = service_messages.select_next_some() => {
                     match srv_msg {
-                        RuntimeMessage::JoinComputation(room_id, n, protocol_id, done) => {
+                        RuntimeMessage::RequestComputation{
+                            room_id,
+                            n,
+                            protocol_id,
+                            args,
+                            done,
+                        } => {
                             match rooms_rpc.entry(room_id) {
                                 Entry::Occupied(e) => {
                                     let mut agent = match agents_factory.make(protocol_id) {
@@ -129,7 +143,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                                         done.send(Err(anyhow!("protocol is busy")));
                                     } else {
                                         agent.on_done(done);
-                                        on_rpc.send((n, agent));
+                                        on_rpc.send(LocalRpcMsg{n, args, agent});
                                     }
                                 }
                                 Entry::Vacant(_) => {
@@ -169,11 +183,13 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                                 room_receiver,
                                 receiver_proxy,
                                 parties,
+                                init_body,
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(parties.size());
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     room_id,
+                                    init_body,
                                     agent,
                                     network_service.clone(),
                                     parties,
@@ -198,11 +214,13 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                                 room_receiver,
                                 receiver_proxy,
                                 parties,
+                                args,
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(n as usize);
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     id,
+                                    args,
                                     agent,
                                     network_service.clone(),
                                     parties,

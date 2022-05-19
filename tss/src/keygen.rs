@@ -20,13 +20,12 @@ use std::fs::File;
 
 use log::info;
 use std::hash::Hasher;
-use std::io::Write;
+use std::io::{BufReader, Write};
 use std::path::Path;
 
 use mpc_runtime::{IncomingMessage, OutgoingMessage};
 
 pub struct DKG {
-    t: u16,
     path: String,
     done: Option<oneshot::Sender<anyhow::Result<Vec<u8>>>>,
 }
@@ -49,11 +48,15 @@ impl mpc_runtime::ComputeAgentAsync for DKG {
         mut self: Box<Self>,
         n: u16,
         i: u16,
+        args: Vec<u8>,
         incoming: mpsc::Receiver<IncomingMessage>,
         outgoing: mpsc::Sender<OutgoingMessage>,
     ) -> anyhow::Result<()> {
+        let mut io = BufReader::new(args);
+        let t = unsigned_varint::io::read_u16(&mut io).unwrap();
+
         let state_machine =
-            Keygen::new(i, self.t, n).map_err(|e| anyhow!("failed building state {e}"))?;
+            Keygen::new(i, t, n).map_err(|e| anyhow!("failed building state {e}"))?;
 
         let (incoming, outgoing) = crate::round_based::state_replication(incoming, outgoing);
 
@@ -76,9 +79,8 @@ impl mpc_runtime::ComputeAgentAsync for DKG {
 }
 
 impl DKG {
-    pub fn new(t: u16, p: &str) -> Self {
+    pub fn new(p: &str) -> Self {
         Self {
-            t,
             path: p.to_owned(),
             done: None,
         }

@@ -1,17 +1,5 @@
 use futures::channel::{mpsc, oneshot};
 
-use round_based::StateMachine;
-
-pub trait ComputeAgent: Send {
-    type StateMachine: StateMachine;
-
-    fn construct_state(&mut self, i: u16, n: u16) -> Self::StateMachine;
-
-    fn session_id(&self) -> u64;
-
-    fn done(self: Box<Self>, result: anyhow::Result<<Self::StateMachine as StateMachine>::Output>);
-}
-
 pub struct IncomingMessage {
     /// Index of party who sent the message.
     pub from: u16,
@@ -47,6 +35,7 @@ pub trait ComputeAgentAsync: Send + Sync {
         self: Box<Self>,
         i: u16,
         n: u16,
+        args: Vec<u8>,
         incoming: mpsc::Receiver<IncomingMessage>,
         outgoing: mpsc::Sender<OutgoingMessage>,
     ) -> anyhow::Result<()>;

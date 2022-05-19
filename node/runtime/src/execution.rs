@@ -42,6 +42,7 @@ struct ProtocolExecState {
 impl ProtocolExecution {
     pub fn new(
         room_id: RoomId,
+        args: Vec<u8>,
         agent: Box<dyn ComputeAgentAsync>,
         network_service: NetworkService,
         parties: Peerset,
@@ -53,7 +54,7 @@ impl ProtocolExecution {
         let (to_protocol, from_runtime) = mpsc::channel((n - 1) as usize);
         let (to_runtime, from_protocol) = mpsc::channel((n - 1) as usize);
 
-        let agent_future = agent.start(n, i + 1, from_runtime, to_runtime);
+        let agent_future = agent.start(n, i + 1, args, from_runtime, to_runtime);
 
         Self {
             state: Some(ProtocolExecState {

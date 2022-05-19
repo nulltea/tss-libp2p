@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 
 use std::fmt::{Debug, Display};
 use std::future::Future;
+use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -26,14 +27,21 @@ impl RpcApi {
 }
 
 impl mpc_rpc::JsonRPCHandler for RpcApi {
-    fn keygen(&self, room: String, n: u16, _t: u16) -> RpcFuture<RpcResult<Point<Secp256k1>>> {
+    fn keygen(&self, room: String, n: u16, t: u16) -> RpcFuture<RpcResult<Point<Secp256k1>>> {
         let mut rt_service = self.rt_service.clone();
 
-        let (tx, rx) = futures::channel::oneshot::channel();
+        lßet(tx, rx) = futures::channel::oneshot::channel();
+
+        let mut io = BufWriter::new(vec![]);
+        let mut buffer = unsigned_varint::encode::u16_buffer();
+        io.write_all(unsigned_varint::encode::u16(
+            self.parties.size(),
+            &mut buffer,
+        ))?;
 
         task::spawn(async move {
             rt_service
-                .join_computation(RoomId::from(room), n, 0, tx)
+                .request_computation(RoomId::from(room), n, 0, io.buffer().to_vec(), tx)
                 .await;
         });
 

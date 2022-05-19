@@ -1,4 +1,4 @@
-use crate::coordination::Phase1Channel;
+use crate::coordination::{LocalRpcMsg, Phase1Channel};
 use crate::peerset::Peerset;
 use crate::ComputeAgentAsync;
 use futures::channel::{mpsc, oneshot};
@@ -40,11 +40,7 @@ impl ReceiverProxy {
 }
 
 impl Future for ReceiverProxy {
-    type Output = (
-        RoomId,
-        Phase1Channel,
-        oneshot::Sender<(u16, Box<dyn ComputeAgentAsync>)>,
-    );
+    type Output = (RoomId, Phase1Channel, oneshot::Sender<LocalRpcMsg>);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.tx.is_closed() {
