@@ -183,6 +183,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-process"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83137067e3a2a6a06d67168e49e68a0957d215410473a740cea95a2425c0b7c6"
+dependencies = [
+ "async-io",
+ "blocking",
+ "cfg-if 1.0.0",
+ "event-listener",
+ "futures-lite",
+ "libc",
+ "once_cell",
+ "signal-hook",
+ "winapi 0.3.9",
+]
+
+[[package]]
 name = "async-std"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -193,6 +210,7 @@ dependencies = [
  "async-global-executor",
  "async-io",
  "async-lock",
+ "async-process",
  "crossbeam-utils 0.8.8",
  "futures-channel",
  "futures-core",
@@ -253,9 +271,9 @@ checksum = "30696a84d817107fc028e049980e09d5e140e8da8f1caeb17e8e950658a3cea9"
 
 [[package]]
 name = "async-trait"
-version = "0.1.52"
+version = "0.1.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "061a7acccaa286c011ddc30970520b98fa40e00c9d644633fb26b5fc63a265e3"
+checksum = "ed6aa3524a2dfcf9fe180c51eae2b58738348d819517ceadf95789c51fff7600"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -443,6 +461,7 @@ dependencies = [
  "cc",
  "cfg-if 1.0.0",
  "constant_time_eq",
+ "digest 0.10.3",
 ]
 
 [[package]]
@@ -2730,7 +2749,6 @@ dependencies = [
  "libp2p",
  "log 0.4.16",
  "mpc-p2p",
- "mpc-peerset",
  "mpc-rpc",
  "mpc-runtime",
  "mpc-tss",
@@ -2758,7 +2776,6 @@ dependencies = [
  "log 0.4.16",
  "mpc-api",
  "mpc-p2p",
- "mpc-peerset",
  "mpc-rpc",
  "mpc-runtime",
  "mpc-tss",
@@ -2777,34 +2794,24 @@ name = "mpc-p2p"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrayvec 0.7.2",
  "async-std",
  "async-trait",
+ "blake3",
  "derive_more",
  "futures 0.3.21",
  "futures-util",
  "hex",
  "libp2p",
  "log 0.4.16",
- "mpc-peerset",
  "parity-scale-codec",
  "parking_lot 0.12.0",
  "serde",
  "serde_ipld_dagcbor",
+ "smallvec 1.8.0",
  "thiserror",
  "unsigned-varint 0.6.0",
  "zeroize",
-]
-
-[[package]]
-name = "mpc-peerset"
-version = "4.0.0-dev"
-dependencies = [
- "futures 0.3.21",
- "itertools 0.10.3",
- "libp2p",
- "log 0.4.16",
- "rand 0.7.3",
- "serde",
 ]
 
 [[package]]
@@ -2827,14 +2834,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-std",
+ "async-trait",
  "blake2 0.10.4",
  "curv-kzen",
  "futures 0.3.21",
  "futures-util",
+ "itertools 0.10.3",
  "libp2p",
  "log 0.4.16",
  "mpc-p2p",
- "mpc-peerset",
  "multi-party-ecdsa",
  "pretty_env_logger",
  "round-based",
@@ -2850,6 +2858,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-std",
+ "async-trait",
  "blake2 0.10.4",
  "curv-kzen",
  "futures 0.3.21",
@@ -2857,7 +2866,6 @@ dependencies = [
  "libp2p",
  "log 0.4.16",
  "mpc-p2p",
- "mpc-peerset",
  "mpc-runtime",
  "multi-party-ecdsa",
  "pretty_env_logger",
@@ -4261,6 +4269,25 @@ checksum = "881bf8156c87b6301fc5ca6b27f11eeb2761224c7081e69b409d5a1951a70c86"
 dependencies = [
  "digest 0.10.3",
  "keccak",
+]
+
+[[package]]
+name = "signal-hook"
+version = "0.3.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "647c97df271007dcea485bb74ffdb57f2e683f1306c854f468a0c244badabf2d"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e51e73328dc4ac0c7ccbda3a494dfa03df1de2f46018127f60c693f2648455b0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

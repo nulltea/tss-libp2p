@@ -2,10 +2,10 @@
 extern crate core;
 
 mod config;
+mod factory;
 mod keygen;
+mod round_based;
 
 pub use config::*;
+pub use factory::*;
 pub use keygen::*;
-
-pub const KEYGEN_PROTOCOL_ID: &str = "/keygen/0.1.0";
-pub const SIGN_PROTOCOL_ID: &str = "/sign/0.1.0";

@@ -8,7 +8,8 @@ use std::str::FromStr;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub parties: Vec<PartyConfig>,
+    pub local: PartyConfig,
+    pub boot_peers: Vec<MultiaddrWithPeerId>,
 }
 
 impl Config {
@@ -18,46 +19,49 @@ impl Config {
         serde_json::from_str(file.as_str())
             .map_err(|e| anyhow!("decoding config terminated with err: {}", e))
     }
-
-    pub fn party_by_peer_id(&self, peer: PeerId) -> Option<&PartyConfig> {
-        self.parties.iter().find(|p| p.network_peer.peer_id == peer)
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PartyConfig {
-    pub name: String,
     pub network_peer: MultiaddrWithPeerId,
     pub rpc_addr: String,
 }
 
-pub fn generate_config(n: u32) -> Result<Config, anyhow::Error> {
-    let mut parties = vec![];
+pub fn generate_config<P: AsRef<Path>, S: AsRef<str>>(
+    cfg_path: P,
+    libp2p_addr: S,
+    rpc_addr: S,
+) -> Result<Config, anyhow::Error>
+where
+    String: From<S>,
+{
+    let node_key = NodeKeyConfig::Ed25519(Secret::New);
+    let keypair = node_key
+        .into_keypair()
+        .map_err(|e| anyhow!("keypair generating err: {}", e))?;
+    let peer_id = PeerId::from(keypair.public());
+    let path = format!("./data/{}/secret.key", peer_id.to_base58());
+    let path = Path::new(&path);
+    let dir = path.parent().unwrap();
+    std::fs::create_dir_all(dir).unwrap();
+    NodeKeyConfig::persist(keypair, path)
+        .map_err(|e| anyhow!("secret key backup failed with err: {}", e))?;
+    let multiaddr = Multiaddr::from_str(libp2p_addr.as_ref())
+        .map_err(|e| anyhow!("multiaddr parce err: {}", e))?;
+    let network_peer = MultiaddrWithPeerId { multiaddr, peer_id };
 
-    for i in 0..n {
-        let node_key = NodeKeyConfig::Ed25519(Secret::File(format!("data/{i}.key").into()));
-        let keypair = node_key
-            .into_keypair()
-            .map_err(|e| anyhow!("keypair generating err: {}", e))?;
-        let peer_id = PeerId::from(keypair.public());
-        let multiaddr = Multiaddr::from_str(format!("/ip4/127.0.0.1/tcp/400{i}").as_str())
-            .map_err(|e| anyhow!("multiaddr parce err: {}", e))?;
-        let network_peer = MultiaddrWithPeerId { multiaddr, peer_id };
-
-        parties.push(PartyConfig {
-            name: format!("player_{i}"),
+    let config = Config {
+        local: PartyConfig {
             network_peer,
-            rpc_addr: format!("127.0.0.1:808{i}"),
-        })
-    }
-
-    let config = Config { parties };
+            rpc_addr: rpc_addr.into(),
+        },
+        boot_peers: vec![],
+    };
 
     let json_bytes = serde_json::to_vec(&config)
         .map_err(|e| anyhow!("config encoding terminated with err: {}", e))?;
 
-    fs::write("config.json", json_bytes.as_slice())
-        .map_err(|e| anyhow!("writing config err: {}", e))?;
+    fs::write(cfg_path, json_bytes.as_slice()).map_err(|e| anyhow!("writing config err: {}", e))?;
 
     Ok(config)
 }

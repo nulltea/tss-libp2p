@@ -24,7 +24,6 @@ pretty_env_logger = "0.4.0"
 
 mpc-p2p = { path = "../network" }
 mpc-rpc = { path = "../rpc" }
-mpc-peerset = { path = "../peerset" }
 mpc-runtime = { path = "../runtime" }
 mpc-tss = { path = "../../tss" }
 

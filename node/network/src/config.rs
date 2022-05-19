@@ -1,9 +1,10 @@
-use crate::broadcast;
+use crate::{broadcast, RoomId};
 use anyhow::anyhow;
+use futures::channel::mpsc;
 use libp2p::identity::{ed25519, Keypair};
 use libp2p::{multiaddr, Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+
 use std::error::Error;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,37 +12,47 @@ use std::str::FromStr;
 use std::{fmt, fs, io};
 use zeroize::Zeroize;
 
+#[derive(Clone)]
 pub struct Params {
-    pub network_config: NetworkConfig,
-    pub broadcast_protocols: Vec<broadcast::ProtocolConfig>,
+    /// Multi-addresses to listen for incoming connections.
+    pub listen_address: Multiaddr,
+    /// Mdns discovery enabled.
+    pub mdns: bool,
+    /// Kademlia discovery enabled.
+    pub kademlia: bool,
+    /// Rooms
+    pub rooms: Vec<RoomArgs>,
 }
 
 #[derive(Clone)]
-pub struct NetworkConfig {
-    pub node_name: String,
-    /// Multi-addresses to listen for incoming connections.
-    pub listen_addresses: Vec<Multiaddr>,
-    /// Multi-addresses to advertise. Detected automatically if empty.
-    pub public_addresses: Vec<Multiaddr>,
+pub struct RoomArgs {
+    pub id: RoomId,
+
+    pub max_size: usize,
+
     /// Configuration for the default set of nodes that participate in computation.
-    pub initial_peers: Vec<MultiaddrWithPeerId>,
+    pub boot_peers: Vec<MultiaddrWithPeerId>,
+
+    /// Channel on which the networking service will send incoming messages.
+    pub inbound_queue: Option<mpsc::Sender<broadcast::IncomingMessage>>,
 }
 
-impl NetworkConfig {
-    pub fn new(multiaddr: Multiaddr, peers: impl Iterator<Item = MultiaddrWithPeerId>) -> Self {
-        Self {
-            node_name: "node".to_string(),
-            listen_addresses: vec![multiaddr.clone()],
-            public_addresses: vec![multiaddr],
-            initial_peers: peers.collect(),
-        }
-    }
+impl RoomArgs {
+    pub fn new_full(
+        name: String,
+        boot_peers: impl Iterator<Item = MultiaddrWithPeerId>,
+        max_size: usize,
+    ) -> (RoomId, Self, mpsc::Receiver<broadcast::IncomingMessage>) {
+        let id = RoomId::from(name);
+        let (tx, rx) = mpsc::channel(max_size);
+        let cfg = Self {
+            id,
+            max_size,
+            boot_peers: boot_peers.collect(),
+            inbound_queue: Some(tx),
+        };
 
-    pub fn into_peers_hashmap(self) -> HashMap<PeerId, Multiaddr> {
-        self.initial_peers
-            .into_iter()
-            .map(|ip| (ip.peer_id, ip.multiaddr))
-            .collect()
+        (id, cfg, rx)
     }
 }
 
@@ -99,6 +110,21 @@ impl NodeKeyConfig {
             )
             .map(ed25519::Keypair::from)
             .map(Keypair::Ed25519),
+        }
+    }
+
+    pub fn persist<P: AsRef<Path>>(k: Keypair, path: P) -> io::Result<()> {
+        match k {
+            Keypair::Ed25519(k) => {
+                let sk = ed25519::SecretKey::from(k);
+                let mut sk_vec = sk.as_ref().to_vec();
+                write_secret_file(path, &sk_vec)?;
+                sk_vec.zeroize();
+                Ok(())
+            }
+            _ => {
+                panic!("unsupported curve");
+            }
         }
     }
 }
