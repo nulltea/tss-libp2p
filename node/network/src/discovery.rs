@@ -10,7 +10,6 @@ use libp2p::{
     },
     kad::{handler::KademliaHandlerProto, Kademlia, KademliaConfig, KademliaEvent, QueryId},
     mdns::MdnsEvent,
-    multiaddr::Protocol,
     swarm::{
         toggle::{Toggle, ToggleIntoProtoHandler},
         IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
@@ -18,7 +17,7 @@ use libp2p::{
     },
 };
 use libp2p::{kad::record::store::MemoryStore, mdns::Mdns};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, trace, warn};
 
 use std::collections::HashMap;
 use std::{

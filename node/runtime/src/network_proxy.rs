@@ -1,11 +1,8 @@
 use crate::coordination::{LocalRpcMsg, Phase1Channel};
 use crate::peerset::Peerset;
-use crate::ComputeAgentAsync;
 use futures::channel::{mpsc, oneshot};
-
 use mpc_p2p::broadcast::IncomingMessage;
 use mpc_p2p::{broadcast, NetworkService, RoomId};
-
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};

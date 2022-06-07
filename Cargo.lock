@@ -2834,6 +2834,7 @@ name = "mpc-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "async-std",
  "async-trait",
  "blake2 0.10.4",
@@ -2857,6 +2858,7 @@ name = "mpc-tss"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "async-std",
  "async-trait",
  "blake2 0.10.4",

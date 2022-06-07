@@ -1,23 +1,19 @@
-use crate::network_proxy::ReceiverProxy;
+use crate::echo::{EchoMessage, EchoResponse};
 use crate::peerset::Peerset;
 use crate::{ComputeAgentAsync, MessageRouting};
-use async_std::stream::Interval;
-use async_std::{stream, task};
-use futures::channel::{mpsc, oneshot};
-use futures::Stream;
-use libp2p::PeerId;
-use mpc_p2p::broadcast::OutgoingResponse;
-use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
-
-use crate::echo::{EchoMessage, EchoResponse};
 use anyhow::anyhow;
+use async_std::task;
+use futures::channel::mpsc;
+use futures::Stream;
 use futures_util::stream::FuturesOrdered;
 use futures_util::{FutureExt, StreamExt};
+use libp2p::PeerId;
 use log::{error, info};
+use mpc_p2p::broadcast::OutgoingResponse;
+use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 pub(crate) struct ProtocolExecution {
     state: Option<ProtocolExecState>,
@@ -54,7 +50,7 @@ impl ProtocolExecution {
         let (to_protocol, from_runtime) = mpsc::channel((n - 1) as usize);
         let (to_runtime, from_protocol) = mpsc::channel((n - 1) as usize);
 
-        let agent_future = agent.start(n, i + 1, args, from_runtime, to_runtime);
+        let agent_future = agent.start(i + 1, n, args, from_runtime, to_runtime);
 
         Self {
             state: Some(ProtocolExecState {

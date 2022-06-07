@@ -1,10 +1,9 @@
 use itertools::Itertools;
 use libp2p::PeerId;
-
 use std::io::{BufReader, Read};
 use std::ops::Index;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Peerset {
     local_peer_id: PeerId,
     peers: Vec<PeerId>,

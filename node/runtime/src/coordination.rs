@@ -9,7 +9,6 @@ use futures::Stream;
 use libp2p::PeerId;
 use mpc_p2p::broadcast::OutgoingResponse;
 use mpc_p2p::{broadcast, MessageType, NetworkService, RoomId};
-
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};

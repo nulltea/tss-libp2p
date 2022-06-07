@@ -6,7 +6,7 @@ use async_std::stream;
 use async_std::stream::Interval;
 use futures::channel::{mpsc, oneshot};
 use futures::Stream;
-use futures_util::stream::{iter, FuturesOrdered};
+use futures_util::stream::{FuturesOrdered};
 use futures_util::FutureExt;
 use libp2p::PeerId;
 use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
@@ -228,7 +228,7 @@ impl StartMsg {
     }
 
     fn to_bytes(self) -> io::Result<Vec<u8>> {
-        let mut b = vec![];
+        let b = vec![];
         let mut io = BufWriter::new(b);
 
         // Read the peerset size.

@@ -8,10 +8,12 @@ mod execution;
 mod negotiation;
 mod network_proxy;
 mod peerset;
+mod peerset_cacher;
 mod runtime;
 mod traits;
 
 pub use error::*;
+pub use peerset_cacher::*;
 pub use runtime::*;
 pub use traits::*;
 

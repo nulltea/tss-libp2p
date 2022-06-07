@@ -8,17 +8,13 @@ use async_std::task;
 use futures::future::{FutureExt, TryFutureExt};
 use futures::StreamExt;
 use gumdrop::Options;
-use libp2p::PeerId;
-
 use mpc_api::RpcApi;
 use mpc_p2p::{NetworkWorker, NodeKeyConfig, Params, RoomArgs, Secret};
 use mpc_rpc::server::JsonRPCServer;
-use mpc_runtime::RuntimeDaemon;
+use mpc_runtime::{EphemeralCacher, RuntimeDaemon};
 use mpc_tss::{generate_config, Config, TssFactory};
 use sha3::Digest;
-
 use std::error::Error;
-use std::fmt::format;
 use std::{iter, process};
 
 #[tokio::main]
@@ -81,6 +77,7 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         net_service,
         iter::once((room_id, room_rx)),
         TssFactory::new(format!("data/{}/key.share", local_peer_id.to_base58())),
+        EphemeralCacher::default(),
     );
 
     let rt_task = task::spawn(async {

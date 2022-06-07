@@ -9,7 +9,6 @@ use futures::channel::mpsc;
 use futures::select;
 use futures_util::stream::StreamExt;
 use libp2p::core::transport::upgrade;
-
 use libp2p::noise::NoiseConfig;
 use libp2p::swarm::SwarmEvent;
 use libp2p::tcp::TcpConfig;

@@ -2,7 +2,6 @@ use blake2::{Blake2s256, Digest};
 use futures::channel::{mpsc, oneshot};
 use futures_util::{pin_mut, select, FutureExt, SinkExt, StreamExt};
 use libp2p::PeerId;
-
 use mpc_p2p::broadcast;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
