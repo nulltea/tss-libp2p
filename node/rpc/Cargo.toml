@@ -14,3 +14,4 @@ jsonrpc-derive = "18"
 jsonrpc-ws-server = "18"
 jsonrpc-core-client = { version = "18", features = ["ws"] }
 curv-kzen = "0.9"
+multi-party-ecdsa = {git = "https://github.com/ZenGo-X/multi-party-ecdsa"}

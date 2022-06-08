@@ -1,6 +1,8 @@
 use crate::peerset::Peerset;
 use crate::PeersetCacher;
+use anyhow::anyhow;
 use async_std::path::Path;
+use libp2p::PeerId;
 use mpc_p2p::RoomId;
 use std::collections::HashMap;
 use std::fs::File;
@@ -12,14 +14,14 @@ pub struct EphemeralCacher {
 }
 
 impl PeersetCacher for EphemeralCacher {
-    fn read_peerset(&self, room_id: &RoomId) -> Result<Peerset, Self> {
+    fn read_peerset(&self, room_id: &RoomId) -> anyhow::Result<Peerset> {
         match self.store.get(room_id) {
             Some(p) => Ok(p.clone()),
-            None => Err(Self),
+            None => Err(anyhow!("no cache exists for room")),
         }
     }
 
-    fn write_peerset(&mut self, room_id: &RoomId, peerset: Peerset) -> Result<(), Self> {
+    fn write_peerset(&mut self, room_id: &RoomId, peerset: Peerset) -> anyhow::Result<()> {
         self.store
             .entry(room_id.clone())
             .and_modify(|e| *e = peerset.clone())
@@ -29,32 +31,38 @@ impl PeersetCacher for EphemeralCacher {
 }
 
 pub struct PersistentCacher {
+    local_peer_id: PeerId,
     path: String,
 }
 
 impl PeersetCacher for PersistentCacher {
-    fn read_peerset(&self, room_id: &RoomId) -> Result<Peerset, Self> {
+    fn read_peerset(&self, room_id: &RoomId) -> anyhow::Result<Peerset> {
         let mut file = File::open(format!("{}/{}", self.path, room_id.as_str()))
             .map_err(|e| anyhow!("error opening local key file: {e}"))?;
 
         let mut buf = vec![];
-        file.read(&mut buf).map_err(|e| Self)?;
+        file.read(&mut buf)
+            .map_err(|e| anyhow!("error reading file: {e}"))?;
 
-        serde_json::from_slice(&buf).map_err(|e| Self)
+        Ok(Peerset::from_bytes(&*buf, self.local_peer_id))
     }
 
-    fn write_peerset(&mut self, room_id: &RoomId, peerset: Peerset) -> Result<(), Self> {
+    fn write_peerset(&mut self, room_id: &RoomId, peerset: Peerset) -> anyhow::Result<()> {
         let mut file = File::open(format!("{}/{}", self.path, room_id.as_str()))
             .map_err(|e| anyhow!("error opening local key file: {e}"))?;
 
-        let bytes = serde_json::to_vec(&peerset).map_err(|e| Self)?;
-        file.write(&bytes).map_err(|e| Self)?;
+        let bytes = peerset.to_bytes();
+        file.write(&bytes)
+            .map_err(|e| anyhow!("error writing to file: {e}"))?;
         Ok(())
     }
 }
 
 impl PersistentCacher {
-    pub fn new(p: &str) -> Self {
-        Self { path: p.to_owned() }
+    pub fn new(p: &str, local_peer_id: PeerId) -> Self {
+        Self {
+            path: p.to_owned(),
+            local_peer_id,
+        }
     }
 }

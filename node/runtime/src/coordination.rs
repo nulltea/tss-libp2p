@@ -127,8 +127,8 @@ impl Future for Phase2Chan {
             Ok(Some(msg)) => match msg.context.message_type {
                 MessageType::Coordination => {
                     let start_msg =
-                        StartMsg::from_bytes(msg.payload, self.service.local_peer_id()).unwrap();
-                    let parties = start_msg.parties;
+                        StartMsg::from_bytes(&*msg.payload, self.service.local_peer_id()).unwrap();
+                    let parties = start_msg.parties; // todo: check with cache
                     let (proxy, rx) = ReceiverProxy::new(
                         self.id.clone(),
                         self.rx.take().unwrap(),
@@ -178,7 +178,7 @@ pub(crate) enum Phase2Msg {
 }
 
 pub(crate) struct LocalRpcMsg {
-    n: u16,
-    args: Vec<u8>,
-    agent: Box<dyn ComputeAgentAsync>,
+    pub n: u16,
+    pub args: Vec<u8>,
+    pub agent: Box<dyn ComputeAgentAsync>,
 }

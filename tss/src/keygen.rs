@@ -42,7 +42,7 @@ impl mpc_runtime::ComputeAgentAsync for KeyGen {
         incoming: async_channel::Receiver<IncomingMessage>,
         outgoing: async_channel::Sender<OutgoingMessage>,
     ) -> anyhow::Result<()> {
-        let mut io = BufReader::new(args);
+        let mut io = BufReader::new(&*args);
         let t = unsigned_varint::io::read_u16(&mut io).unwrap();
 
         let state_machine = Keygen::new(i, t, parties.len() as u16)
@@ -63,7 +63,8 @@ impl mpc_runtime::ComputeAgentAsync for KeyGen {
         if let Some(tx) = self.done.take() {
             let pk_bytes = serde_ipld_dagcbor::to_vec(&pk)
                 .map_err(|e| anyhow!("error encoding public key {e}"))?;
-            tx.send(pk_bytes).expect("channel is expected to be open");
+            tx.send(Ok(pk_bytes))
+                .expect("channel is expected to be open");
         };
 
         Ok(())

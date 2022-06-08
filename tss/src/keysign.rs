@@ -82,14 +82,12 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
             .try_collect()
             .await?;
 
-        let sig = signing
-            .complete(&partial_signatures)
-            .context("online stage failed")?;
+        let sig = signing.complete(&partial_signatures)?;
 
         if let Some(tx) = self.done.take() {
             let signature_bytes = serde_ipld_dagcbor::to_vec(&sig)
                 .map_err(|e| anyhow!("error encoding signature {e}"))?;
-            tx.send(signature_bytes)
+            tx.send(Ok(signature_bytes))
                 .expect("channel is expected to be open");
         }
 

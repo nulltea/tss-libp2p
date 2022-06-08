@@ -26,8 +26,8 @@ struct ProtocolExecState {
     network_service: NetworkService,
     parties: Peerset,
     from_network: mpsc::Receiver<broadcast::IncomingMessage>,
-    to_protocol: mpsc::Sender<crate::IncomingMessage>,
-    from_protocol: mpsc::Receiver<crate::OutgoingMessage>,
+    to_protocol: async_channel::Sender<crate::IncomingMessage>,
+    from_protocol: async_channel::Receiver<crate::OutgoingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
     agent_future: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>,
     pending_futures: FuturesOrdered<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -47,10 +47,16 @@ impl ProtocolExecution {
     ) -> Self {
         let n = parties.size() as u16;
         let i = parties.index_of(&network_service.local_peer_id()).unwrap();
-        let (to_protocol, from_runtime) = mpsc::channel((n - 1) as usize);
-        let (to_runtime, from_protocol) = mpsc::channel((n - 1) as usize);
+        let (to_protocol, from_runtime) = async_channel::bounded((n - 1) as usize);
+        let (to_runtime, from_protocol) = async_channel::bounded((n - 1) as usize);
 
-        let agent_future = agent.start(i + 1, n, args, from_runtime, to_runtime);
+        let agent_future = agent.start(
+            i + 1,
+            parties.session_peers.iter().map(|i| *i as u16).collect(),
+            args,
+            from_runtime,
+            to_runtime,
+        );
 
         Self {
             state: Some(ProtocolExecState {

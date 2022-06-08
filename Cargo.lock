@@ -2827,6 +2827,7 @@ dependencies = [
  "jsonrpc-core-client",
  "jsonrpc-derive",
  "jsonrpc-ws-server",
+ "multi-party-ecdsa",
 ]
 
 [[package]]

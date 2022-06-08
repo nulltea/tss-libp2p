@@ -73,4 +73,16 @@ pub struct KeygenArgs {
 #[derive(Debug, Options, Clone)]
 pub struct SignArgs {
     help: bool,
+
+    #[options(help = "mpc room")]
+    pub room: String,
+
+    #[options(help = "json rpc addresses")]
+    pub address: String,
+
+    #[options(help = "threshold needed sign the messages (T)")]
+    pub threshold: u16,
+
+    #[options(help = "messages to sign")]
+    pub messages: String,
 }

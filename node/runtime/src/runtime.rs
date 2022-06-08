@@ -3,6 +3,7 @@ use crate::coordination::Phase2Msg;
 use crate::echo::EchoGadget;
 use crate::execution::ProtocolExecution;
 use crate::negotiation::NegotiationMsg;
+use crate::peerset::Peerset;
 use crate::{coordination, ComputeAgentAsync, PeersetCacher, ProtocolAgentFactory};
 use anyhow::anyhow;
 use blake2::Digest;
@@ -95,7 +96,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
             rooms,
             agents_factory,
             from_service,
-            peerset_cacher,
+            mut peerset_cacher,
         } = self;
 
         for (room_id, rx) in rooms.into_iter() {
@@ -200,8 +201,12 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
                     coordination::Phase1Msg::FromLocal {
                         id,
                         n,
-                        negotiation,
+                        mut negotiation,
                     } => {
+                        if let Ok(peerset) = peerset_cacher.read_peerset(&id) {
+                            negotiation.set_peerset(peerset);
+                        }
+
                         match negotiation.await {
                             NegotiationMsg::Start {
                                 agent,
@@ -212,6 +217,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(n as usize);
+                                peerset_cacher.write_peerset(&id, parties.clone());
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     id,
                                     args,
