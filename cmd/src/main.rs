@@ -11,7 +11,7 @@ use gumdrop::Options;
 use mpc_api::RpcApi;
 use mpc_p2p::{NetworkWorker, NodeKeyConfig, Params, RoomArgs, Secret};
 use mpc_rpc::server::JsonRPCServer;
-use mpc_runtime::{EphemeralCacher, RuntimeDaemon};
+use mpc_runtime::{EphemeralCacher, PersistentCacher, RuntimeDaemon};
 use mpc_tss::{generate_config, Config, TssFactory};
 use sha3::Digest;
 use std::error::Error;
@@ -77,7 +77,10 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         net_service,
         iter::once((room_id, room_rx)),
         TssFactory::new(format!("data/{}/key.share", local_peer_id.to_base58())),
-        EphemeralCacher::default(),
+        PersistentCacher::new(
+            format!("data/{}/peersets", local_peer_id.to_base58()),
+            local_peer_id.clone(),
+        ),
     );
 
     let rt_task = task::spawn(async {

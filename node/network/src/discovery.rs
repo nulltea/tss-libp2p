@@ -171,7 +171,6 @@ impl NetworkBehaviour for DiscoveryBehaviour {
     }
 
     fn inject_disconnected(&mut self, peer_id: &PeerId) {
-        self.peers.remove(peer_id);
         self.pending_events
             .push_back(DiscoveryOut::Disconnected(*peer_id));
 

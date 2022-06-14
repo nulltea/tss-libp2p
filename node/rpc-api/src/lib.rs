@@ -83,7 +83,7 @@ impl<T: DeserializeOwned + Unpin, E: Display> Future for AsyncResult<T, E> {
                 Ok(Some(Err(e))) => {
                     return Poll::Ready(Err(RpcError {
                         code: RpcErrorCode::InternalError,
-                        message: format!("keygen computation terminated with err: {e}"),
+                        message: format!("computation terminated with err: {e}"),
                         data: None,
                     }))
                 }
@@ -91,7 +91,7 @@ impl<T: DeserializeOwned + Unpin, E: Display> Future for AsyncResult<T, E> {
                 Err(e) => {
                     return Poll::Ready(Err(RpcError {
                         code: RpcErrorCode::InternalError,
-                        message: format!("keygen computation terminated with err: {e}"),
+                        message: format!("computation terminated with err: {e}"),
                         data: None,
                     }))
                 }

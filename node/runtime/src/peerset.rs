@@ -8,7 +8,7 @@ use std::ops::Index;
 pub struct Peerset {
     local_peer_id: PeerId,
     room_peers: Vec<PeerId>,
-    pub(crate) session_peers: HashSet<usize>,
+    pub(crate) session_peers: Vec<usize>,
 }
 
 impl Peerset {
@@ -23,11 +23,11 @@ impl Peerset {
     }
 
     pub fn from_cache(cache: Self, peers: impl Iterator<Item = PeerId>) -> Result<Self, PeerId> {
-        let mut session_peers = HashSet::new();
-        for peer_id in peers {
+        let mut session_peers = vec![];
+        for peer_id in peers.sorted_by_key(|p| p.to_bytes()) {
             match cache.index_of(&peer_id) {
                 Some(i) => {
-                    session_peers.insert(i as usize);
+                    session_peers.push(i as usize);
                 }
                 None => return Err(peer_id),
             }
@@ -42,7 +42,7 @@ impl Peerset {
 
     pub fn from_bytes(bytes: &[u8], local_peer_id: PeerId) -> Self {
         let mut peers = vec![];
-        let mut active_peers = HashSet::new();
+        let mut active_peers = vec![];
         let mut reader = BufReader::new(bytes);
 
         loop {
@@ -56,14 +56,14 @@ impl Peerset {
             let mut buf = [0; 1];
             reader.read(&mut buf).unwrap();
             if buf[0] == 1 {
-                active_peers.insert(peers.last().unwrap().clone());
+                active_peers.push(peers.last().unwrap().clone());
             }
         }
 
         let peers: Vec<_> = peers.into_iter().sorted_by_key(|p| p.to_bytes()).collect();
-        let mut active_indexes = HashSet::new();
+        let mut active_indexes = vec![];
         for peer_id in active_peers {
-            active_indexes.insert(peers.iter().position(|elem| *elem == peer_id).unwrap());
+            active_indexes.push(peers.iter().position(|elem| *elem == peer_id).unwrap());
         }
 
         Self {

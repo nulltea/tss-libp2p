@@ -1,3 +1,9 @@
+use std::fs;
+use std::fs::File;
+use std::hash::Hasher;
+use std::io::{BufReader, Read, Write};
+use std::path::Path;
+
 use anyhow::anyhow;
 use curv::arithmetic::Converter;
 use curv::elliptic::curves::{Point, Secp256k1};
@@ -6,16 +12,13 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::TryFutureExt;
 use futures::StreamExt;
 use futures_util::{pin_mut, FutureExt, SinkExt, TryStreamExt};
-use mpc_runtime::{IncomingMessage, OutgoingMessage};
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::LocalKey;
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::sign::{
     OfflineStage, SignManual,
 };
 use round_based::{AsyncProtocol, Msg};
-use std::fs::File;
-use std::hash::Hasher;
-use std::io::{BufReader, Read, Write};
-use std::path::Path;
+
+use mpc_runtime::{IncomingMessage, OutgoingMessage};
 
 pub struct KeySign {
     path: String,
@@ -29,7 +32,7 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
     }
 
     fn protocol_id(&self) -> u64 {
-        0
+        1
     }
 
     fn on_done(&mut self, done: oneshot::Sender<anyhow::Result<Vec<u8>>>) {
@@ -104,12 +107,8 @@ impl KeySign {
     }
 
     fn read_local_key(&self) -> anyhow::Result<LocalKey<Secp256k1>> {
-        let mut file = File::open(self.path.as_str())
-            .map_err(|e| anyhow!("error opening local key file: {e}"))?;
-
-        let mut share_bytes = vec![];
-        file.read(&mut share_bytes)
-            .map_err(|e| anyhow!("error reading local key: {e}"))?;
+        let share_bytes =
+            fs::read(self.path.as_str()).map_err(|e| anyhow!("error reading local key: {e}"))?;
 
         serde_json::from_slice(&share_bytes)
             .map_err(|e| anyhow!("error deserializing local key: {e}"))

@@ -182,6 +182,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(parties.size());
+                                peerset_cacher.write_peerset(&room_id, parties.clone()); // todo verify consistency
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     room_id,
                                     init_body,

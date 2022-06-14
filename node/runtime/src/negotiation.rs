@@ -117,7 +117,7 @@ impl Future for NegotiationChan {
                                     MessageContext {
                                         message_type: MessageType::Coordination,
                                         session_id: agent.session_id().into(),
-                                        protocol_id: 0,
+                                        protocol_id: agent.protocol_id(),
                                     },
                                     start_msg.to_bytes().unwrap(),
                                     None,

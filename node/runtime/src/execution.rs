@@ -22,6 +22,7 @@ pub(crate) struct ProtocolExecution {
 struct ProtocolExecState {
     room_id: RoomId,
     local_peer_id: PeerId,
+    protocol_id: u64,
     session_id: u64,
     network_service: NetworkService,
     parties: Peerset,
@@ -47,12 +48,17 @@ impl ProtocolExecution {
     ) -> Self {
         let n = parties.size() as u16;
         let i = parties.index_of(&network_service.local_peer_id()).unwrap();
+        let protocol_id = agent.protocol_id();
         let (to_protocol, from_runtime) = async_channel::bounded((n - 1) as usize);
         let (to_runtime, from_protocol) = async_channel::bounded((n - 1) as usize);
 
         let agent_future = agent.start(
             i + 1,
-            parties.session_peers.iter().map(|i| *i as u16).collect(),
+            parties
+                .session_peers
+                .iter()
+                .map(|i| (*i + 1) as u16)
+                .collect(),
             args,
             from_runtime,
             to_runtime,
@@ -62,6 +68,7 @@ impl ProtocolExecution {
             state: Some(ProtocolExecState {
                 room_id,
                 local_peer_id: network_service.local_peer_id(),
+                protocol_id,
                 session_id: 0,
                 network_service,
                 parties,
@@ -85,6 +92,7 @@ impl Future for ProtocolExecution {
         let ProtocolExecState {
             room_id,
             local_peer_id,
+            protocol_id,
             session_id,
             network_service,
             parties,
@@ -156,7 +164,7 @@ impl Future for ProtocolExecution {
                                 MessageContext {
                                     message_type: MessageType::Computation,
                                     session_id,
-                                    protocol_id: 0,
+                                    protocol_id,
                                 },
                                 message.body,
                                 res_tx,
@@ -185,7 +193,7 @@ impl Future for ProtocolExecution {
                                 MessageContext {
                                     message_type: MessageType::Coordination,
                                     session_id,
-                                    protocol_id: 0,
+                                    protocol_id,
                                 },
                                 message.body.clone(),
                                 Some(res_tx),
@@ -212,6 +220,7 @@ impl Future for ProtocolExecution {
                 self.state.insert(ProtocolExecState {
                     room_id,
                     local_peer_id,
+                    protocol_id,
                     session_id,
                     network_service,
                     parties,

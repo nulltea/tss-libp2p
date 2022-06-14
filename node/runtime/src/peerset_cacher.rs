@@ -5,6 +5,7 @@ use async_std::path::Path;
 use libp2p::PeerId;
 use mpc_p2p::RoomId;
 use std::collections::HashMap;
+use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
 
@@ -37,31 +38,27 @@ pub struct PersistentCacher {
 
 impl PeersetCacher for PersistentCacher {
     fn read_peerset(&self, room_id: &RoomId) -> anyhow::Result<Peerset> {
-        let mut file = File::open(format!("{}/{}", self.path, room_id.as_str()))
-            .map_err(|e| anyhow!("error opening local key file: {e}"))?;
-
-        let mut buf = vec![];
-        file.read(&mut buf)
-            .map_err(|e| anyhow!("error reading file: {e}"))?;
+        let buf = fs::read(format!("{}/{}", self.path, room_id.as_str()))
+            .map_err(|e| anyhow!("error reading peerset cache file: {e}"))?;
 
         Ok(Peerset::from_bytes(&*buf, self.local_peer_id))
     }
 
     fn write_peerset(&mut self, room_id: &RoomId, peerset: Peerset) -> anyhow::Result<()> {
-        let mut file = File::open(format!("{}/{}", self.path, room_id.as_str()))
-            .map_err(|e| anyhow!("error opening local key file: {e}"))?;
+        let path = format!("{}/{}", self.path, room_id.as_str());
+        let path = Path::new(&path);
+        let dir = path.parent().unwrap();
+        fs::create_dir_all(dir).unwrap();
+        fs::write(path, peerset.to_bytes()).map_err(|e| anyhow!("error writing to file: {e}"))?;
 
-        let bytes = peerset.to_bytes();
-        file.write(&bytes)
-            .map_err(|e| anyhow!("error writing to file: {e}"))?;
         Ok(())
     }
 }
 
 impl PersistentCacher {
-    pub fn new(p: &str, local_peer_id: PeerId) -> Self {
+    pub fn new(p: String, local_peer_id: PeerId) -> Self {
         Self {
-            path: p.to_owned(),
+            path: p,
             local_peer_id,
         }
     }
