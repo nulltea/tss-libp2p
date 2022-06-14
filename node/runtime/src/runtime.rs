@@ -1,32 +1,21 @@
+use crate::coordination::LocalRpcMsg;
 use crate::coordination::Phase2Msg;
-use crate::echo::{EchoGadget, EchoMessage, EchoResponse};
+use crate::echo::EchoGadget;
 use crate::execution::ProtocolExecution;
 use crate::negotiation::NegotiationMsg;
-
 use crate::peerset::Peerset;
-
-use crate::{coordination, ComputeAgentAsync, MessageRouting, ProtocolAgentFactory};
+use crate::{coordination, ComputeAgentAsync, PeersetCacher, ProtocolAgentFactory};
 use anyhow::anyhow;
-use async_std::prelude::Stream;
-use async_std::task;
 use blake2::Digest;
-
-use crate::coordination::LocalRpcMsg;
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
-use futures_util::stream::{FuturesOrdered, FuturesUnordered};
+use futures_util::stream::FuturesUnordered;
 use futures_util::{select, FutureExt, SinkExt};
-use log::{error, info};
-use mpc_p2p::broadcast::{IncomingMessage, OutgoingResponse};
-use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
-
+use log::error;
+use mpc_p2p::broadcast::OutgoingResponse;
+use mpc_p2p::{broadcast, NetworkService, RoomId};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-
-use std::future::Future;
-use std::pin::Pin;
-
-use std::task::{Context, Poll};
 
 pub enum RuntimeMessage {
     RequestComputation {
@@ -64,18 +53,22 @@ impl RuntimeService {
     }
 }
 
-pub struct RuntimeDaemon<TFactory> {
+pub struct RuntimeDaemon<TFactory, TPeersetCacher> {
     network_service: NetworkService,
     rooms: HashMap<RoomId, mpsc::Receiver<broadcast::IncomingMessage>>,
     agents_factory: TFactory,
     from_service: mpsc::Receiver<RuntimeMessage>,
+    peerset_cacher: TPeersetCacher,
 }
 
-impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
+impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCacher>
+    RuntimeDaemon<TFactory, TPeersetCacher>
+{
     pub fn new(
         network_service: NetworkService,
         rooms: impl Iterator<Item = (RoomId, mpsc::Receiver<broadcast::IncomingMessage>)>,
         agents_factory: TFactory,
+        peerset_cacher: TPeersetCacher,
     ) -> (Self, RuntimeService) {
         let (tx, rx) = mpsc::channel(2);
 
@@ -84,6 +77,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
             rooms: rooms.collect(),
             from_service: rx,
             agents_factory,
+            peerset_cacher,
         };
 
         let service = RuntimeService { to_runtime: tx };
@@ -102,6 +96,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
             rooms,
             agents_factory,
             from_service,
+            mut peerset_cacher,
         } = self;
 
         for (room_id, rx) in rooms.into_iter() {
@@ -187,6 +182,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(parties.size());
+                                peerset_cacher.write_peerset(&room_id, parties.clone()); // todo verify consistency
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     room_id,
                                     init_body,
@@ -206,8 +202,12 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                     coordination::Phase1Msg::FromLocal {
                         id,
                         n,
-                        negotiation,
+                        mut negotiation,
                     } => {
+                        if let Ok(peerset) = peerset_cacher.read_peerset(&id) {
+                            negotiation.set_peerset(peerset);
+                        }
+
                         match negotiation.await {
                             NegotiationMsg::Start {
                                 agent,
@@ -218,6 +218,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(n as usize);
+                                peerset_cacher.write_peerset(&id, parties.clone());
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     id,
                                     args,

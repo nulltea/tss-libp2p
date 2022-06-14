@@ -2,23 +2,19 @@
 
 mod args;
 
-use crate::args::{Command, DeployArgs, KeygenArgs, MPCArgs, SetupArgs};
+use crate::args::{Command, DeployArgs, KeygenArgs, MPCArgs, SetupArgs, SignArgs};
 use anyhow::anyhow;
 use async_std::task;
 use futures::future::{FutureExt, TryFutureExt};
 use futures::StreamExt;
 use gumdrop::Options;
-use libp2p::PeerId;
-
 use mpc_api::RpcApi;
 use mpc_p2p::{NetworkWorker, NodeKeyConfig, Params, RoomArgs, Secret};
 use mpc_rpc::server::JsonRPCServer;
-use mpc_runtime::RuntimeDaemon;
+use mpc_runtime::{EphemeralCacher, PersistentCacher, RuntimeDaemon};
 use mpc_tss::{generate_config, Config, TssFactory};
 use sha3::Digest;
-
 use std::error::Error;
-use std::fmt::format;
 use std::{iter, process};
 
 #[tokio::main]
@@ -36,7 +32,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Command::Deploy(args) => deploy(args).await?,
         Command::Setup(args) => setup(args)?,
         Command::Keygen(args) => keygen(args).await?,
-        Command::Sign(_sign_args) => println!("Sign"),
+        Command::Sign(args) => sign(args).await?,
     }
 
     Ok(())
@@ -81,6 +77,10 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         net_service,
         iter::once((room_id, room_rx)),
         TssFactory::new(format!("data/{}/key.share", local_peer_id.to_base58())),
+        PersistentCacher::new(
+            format!("data/{}/peersets", local_peer_id.to_base58()),
+            local_peer_id.clone(),
+        ),
     );
 
     let rt_task = task::spawn(async {
@@ -122,6 +122,20 @@ async fn keygen(args: KeygenArgs) -> anyhow::Result<()> {
     };
 
     println!("Keygen finished! Keccak256 address => 0x{:x}", pub_key_hash);
+
+    Ok(())
+}
+
+async fn sign(args: SignArgs) -> anyhow::Result<()> {
+    let res = mpc_rpc::new_client(args.address)
+        .await?
+        .sign(args.room, args.threshold, args.messages.as_bytes().to_vec())
+        .await
+        .map_err(|e| anyhow!("error signing: {e}"))?;
+
+    let signature =
+        serde_json::to_string(&res).map_err(|e| anyhow!("error encoding signature: {e}"))?;
+    println!("{}", signature);
 
     Ok(())
 }

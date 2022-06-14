@@ -6,7 +6,7 @@ use async_std::stream;
 use async_std::stream::Interval;
 use futures::channel::{mpsc, oneshot};
 use futures::Stream;
-use futures_util::stream::{iter, FuturesOrdered};
+use futures_util::stream::FuturesOrdered;
 use futures_util::FutureExt;
 use libp2p::PeerId;
 use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
@@ -33,6 +33,7 @@ struct NegotiationState {
     service: NetworkService,
     peers: HashSet<PeerId>,
     responses: Option<mpsc::Receiver<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
+    cached_peerset: Option<Peerset>,
     pending_futures: FuturesOrdered<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
@@ -57,9 +58,14 @@ impl NegotiationChan {
                 service,
                 peers: iter::once(local_peer_id).collect(),
                 responses: None,
+                cached_peerset: None,
                 pending_futures: Default::default(),
             }),
         }
+    }
+
+    pub fn set_peerset(&mut self, peerset: Peerset) {
+        let _ = self.state.as_mut().unwrap().cached_peerset.insert(peerset);
     }
 }
 
@@ -74,6 +80,7 @@ impl Future for NegotiationChan {
             service,
             mut peers,
             mut responses,
+            mut cached_peerset,
             mut pending_futures,
         } = self.state.take().unwrap();
 
@@ -91,8 +98,12 @@ impl Future for NegotiationChan {
                     peers.insert(peer_id);
                     if peers.len() == n as usize {
                         let agent = self.agent.take().unwrap();
-                        let parties =
-                            Peerset::new(peers.clone().into_iter(), service.local_peer_id());
+                        let peers_iter = peers.clone().into_iter();
+                        let parties = match cached_peerset {
+                            Some(cache) => Peerset::from_cache(cache, peers_iter)
+                                .expect("no new peer_ids expected"),
+                            None => Peerset::new(peers_iter, service.local_peer_id()),
+                        };
                         let start_msg = StartMsg {
                             parties: parties.clone(),
                             body: args.clone(),
@@ -106,7 +117,7 @@ impl Future for NegotiationChan {
                                     MessageContext {
                                         message_type: MessageType::Coordination,
                                         session_id: agent.session_id().into(),
-                                        protocol_id: 0,
+                                        protocol_id: agent.protocol_id(),
                                     },
                                     start_msg.to_bytes().unwrap(),
                                     None,
@@ -157,7 +168,7 @@ impl Future for NegotiationChan {
                     )
                     .boxed(),
             );
-            responses.insert(rx);
+            let _ = responses.insert(rx);
         }
 
         // It took too long for peerset to be assembled  - reset to Phase 1.
@@ -166,13 +177,14 @@ impl Future for NegotiationChan {
             return Poll::Ready(NegotiationMsg::Abort(id.clone(), ch, tx));
         }
 
-        self.state.insert(NegotiationState {
+        let _ = self.state.insert(NegotiationState {
             id,
             n,
             args,
             service,
             peers,
             responses,
+            cached_peerset,
             pending_futures,
         });
 
@@ -199,7 +211,7 @@ pub(crate) struct StartMsg {
 }
 
 impl StartMsg {
-    pub(crate) fn from_bytes(b: Vec<u8>, local_peer_id: PeerId) -> io::Result<Self> {
+    pub(crate) fn from_bytes(b: &[u8], local_peer_id: PeerId) -> io::Result<Self> {
         let mut peers = vec![];
         let mut io = BufReader::new(b);
 
@@ -228,7 +240,7 @@ impl StartMsg {
     }
 
     fn to_bytes(self) -> io::Result<Vec<u8>> {
-        let mut b = vec![];
+        let b = vec![];
         let mut io = BufWriter::new(b);
 
         // Read the peerset size.

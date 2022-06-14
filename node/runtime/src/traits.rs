@@ -1,4 +1,8 @@
-use futures::channel::{mpsc, oneshot};
+use crate::peerset::Peerset;
+use anyhow::anyhow;
+use futures::channel::oneshot;
+use mpc_p2p::RoomId;
+use std::collections::HashSet;
 
 pub struct IncomingMessage {
     /// Index of party who sent the message.
@@ -34,9 +38,15 @@ pub trait ComputeAgentAsync: Send + Sync {
     async fn start(
         self: Box<Self>,
         i: u16,
-        n: u16,
+        parties: Vec<u16>,
         args: Vec<u8>,
-        incoming: mpsc::Receiver<IncomingMessage>,
-        outgoing: mpsc::Sender<OutgoingMessage>,
+        incoming: async_channel::Receiver<IncomingMessage>,
+        outgoing: async_channel::Sender<OutgoingMessage>,
     ) -> anyhow::Result<()>;
+}
+
+pub trait PeersetCacher {
+    fn read_peerset(&self, room_id: &RoomId) -> anyhow::Result<Peerset>;
+
+    fn write_peerset(&mut self, room_id: &RoomId, peerset: Peerset) -> anyhow::Result<()>;
 }

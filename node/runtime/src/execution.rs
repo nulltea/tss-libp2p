@@ -1,23 +1,19 @@
-use crate::network_proxy::ReceiverProxy;
+use crate::echo::{EchoMessage, EchoResponse};
 use crate::peerset::Peerset;
 use crate::{ComputeAgentAsync, MessageRouting};
-use async_std::stream::Interval;
-use async_std::{stream, task};
-use futures::channel::{mpsc, oneshot};
-use futures::Stream;
-use libp2p::PeerId;
-use mpc_p2p::broadcast::OutgoingResponse;
-use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
-
-use crate::echo::{EchoMessage, EchoResponse};
 use anyhow::anyhow;
+use async_std::task;
+use futures::channel::mpsc;
+use futures::Stream;
 use futures_util::stream::FuturesOrdered;
 use futures_util::{FutureExt, StreamExt};
+use libp2p::PeerId;
 use log::{error, info};
+use mpc_p2p::broadcast::OutgoingResponse;
+use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 pub(crate) struct ProtocolExecution {
     state: Option<ProtocolExecState>,
@@ -26,12 +22,13 @@ pub(crate) struct ProtocolExecution {
 struct ProtocolExecState {
     room_id: RoomId,
     local_peer_id: PeerId,
+    protocol_id: u64,
     session_id: u64,
     network_service: NetworkService,
     parties: Peerset,
     from_network: mpsc::Receiver<broadcast::IncomingMessage>,
-    to_protocol: mpsc::Sender<crate::IncomingMessage>,
-    from_protocol: mpsc::Receiver<crate::OutgoingMessage>,
+    to_protocol: async_channel::Sender<crate::IncomingMessage>,
+    from_protocol: async_channel::Receiver<crate::OutgoingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
     agent_future: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>,
     pending_futures: FuturesOrdered<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -51,15 +48,27 @@ impl ProtocolExecution {
     ) -> Self {
         let n = parties.size() as u16;
         let i = parties.index_of(&network_service.local_peer_id()).unwrap();
-        let (to_protocol, from_runtime) = mpsc::channel((n - 1) as usize);
-        let (to_runtime, from_protocol) = mpsc::channel((n - 1) as usize);
+        let protocol_id = agent.protocol_id();
+        let (to_protocol, from_runtime) = async_channel::bounded((n - 1) as usize);
+        let (to_runtime, from_protocol) = async_channel::bounded((n - 1) as usize);
 
-        let agent_future = agent.start(n, i + 1, args, from_runtime, to_runtime);
+        let agent_future = agent.start(
+            i + 1,
+            parties
+                .session_peers
+                .iter()
+                .map(|i| (*i + 1) as u16)
+                .collect(),
+            args,
+            from_runtime,
+            to_runtime,
+        );
 
         Self {
             state: Some(ProtocolExecState {
                 room_id,
                 local_peer_id: network_service.local_peer_id(),
+                protocol_id,
                 session_id: 0,
                 network_service,
                 parties,
@@ -83,6 +92,7 @@ impl Future for ProtocolExecution {
         let ProtocolExecState {
             room_id,
             local_peer_id,
+            protocol_id,
             session_id,
             network_service,
             parties,
@@ -154,7 +164,7 @@ impl Future for ProtocolExecution {
                                 MessageContext {
                                     message_type: MessageType::Computation,
                                     session_id,
-                                    protocol_id: 0,
+                                    protocol_id,
                                 },
                                 message.body,
                                 res_tx,
@@ -183,7 +193,7 @@ impl Future for ProtocolExecution {
                                 MessageContext {
                                     message_type: MessageType::Coordination,
                                     session_id,
-                                    protocol_id: 0,
+                                    protocol_id,
                                 },
                                 message.body.clone(),
                                 Some(res_tx),
@@ -210,6 +220,7 @@ impl Future for ProtocolExecution {
                 self.state.insert(ProtocolExecState {
                     room_id,
                     local_peer_id,
+                    protocol_id,
                     session_id,
                     network_service,
                     parties,

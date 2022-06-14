@@ -1,37 +1,27 @@
 use anyhow::anyhow;
-
 use curv::elliptic::curves::{Point, Secp256k1};
-
+use futures::channel::oneshot::Sender;
+use futures::channel::{mpsc, oneshot};
 use futures::future::TryFutureExt;
-
+use futures::StreamExt;
+use futures_util::{pin_mut, FutureExt, SinkExt};
+use mpc_runtime::{IncomingMessage, OutgoingMessage};
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::{
     Keygen, LocalKey,
 };
-
-use futures::channel::oneshot::Sender;
-use futures::channel::{mpsc, oneshot};
-use futures::StreamExt;
-
-use futures_util::{pin_mut, FutureExt, SinkExt};
-
 use round_based::AsyncProtocol;
-
 use std::fs::File;
-
-use log::info;
 use std::hash::Hasher;
 use std::io::{BufReader, Write};
 use std::path::Path;
 
-use mpc_runtime::{IncomingMessage, OutgoingMessage};
-
-pub struct DKG {
+pub struct KeyGen {
     path: String,
     done: Option<oneshot::Sender<anyhow::Result<Vec<u8>>>>,
 }
 
 #[async_trait::async_trait]
-impl mpc_runtime::ComputeAgentAsync for DKG {
+impl mpc_runtime::ComputeAgentAsync for KeyGen {
     fn session_id(&self) -> u64 {
         0
     }
@@ -41,22 +31,22 @@ impl mpc_runtime::ComputeAgentAsync for DKG {
     }
 
     fn on_done(&mut self, done: Sender<anyhow::Result<Vec<u8>>>) {
-        self.done.insert(done);
+        let _ = self.done.insert(done);
     }
 
     async fn start(
         mut self: Box<Self>,
-        n: u16,
         i: u16,
+        parties: Vec<u16>,
         args: Vec<u8>,
-        incoming: mpsc::Receiver<IncomingMessage>,
-        outgoing: mpsc::Sender<OutgoingMessage>,
+        incoming: async_channel::Receiver<IncomingMessage>,
+        outgoing: async_channel::Sender<OutgoingMessage>,
     ) -> anyhow::Result<()> {
-        let mut io = BufReader::new(args);
+        let mut io = BufReader::new(&*args);
         let t = unsigned_varint::io::read_u16(&mut io).unwrap();
 
-        let state_machine =
-            Keygen::new(i, t, n).map_err(|e| anyhow!("failed building state {e}"))?;
+        let state_machine = Keygen::new(i, t, parties.len() as u16)
+            .map_err(|e| anyhow!("failed building state {e}"))?;
 
         let (incoming, outgoing) = crate::round_based::state_replication(incoming, outgoing);
 
@@ -68,17 +58,20 @@ impl mpc_runtime::ComputeAgentAsync for DKG {
             .await
             .map_err(|e| anyhow!("protocol execution terminated with error: {e}"))?;
 
-        if let Some(tx) = self.done.take() {
-            tx.send(serde_ipld_dagcbor::to_vec(&res.y_sum_s).map_err(|e| anyhow!("failed {e}")));
-        }
+        let pk = self.save_local_key(res)?;
 
-        self.save_local_key(res);
+        if let Some(tx) = self.done.take() {
+            let pk_bytes = serde_ipld_dagcbor::to_vec(&pk)
+                .map_err(|e| anyhow!("error encoding public key {e}"))?;
+            tx.send(Ok(pk_bytes))
+                .expect("channel is expected to be open");
+        };
 
         Ok(())
     }
 }
 
-impl DKG {
+impl KeyGen {
     pub fn new(p: &str) -> Self {
         Self {
             path: p.to_owned(),
@@ -98,7 +91,7 @@ impl DKG {
             .map_err(|e| anyhow!("share serialization terminated with error: {e}"))?;
 
         file.write(&share_bytes)
-            .map_err(|e| anyhow!("share serialization terminated with error: {e}"))?;
+            .map_err(|e| anyhow!("error writing local key to file: {e}"))?;
 
         Ok(local_key.y_sum_s)
     }

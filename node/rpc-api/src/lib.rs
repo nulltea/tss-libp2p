@@ -9,6 +9,7 @@ use mpc_rpc::{RpcError, RpcErrorCode, RpcFuture, RpcResult};
 
 use serde::de::DeserializeOwned;
 
+use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::party_i::SignatureRecid;
 use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::io::{BufWriter, Write};
@@ -30,14 +31,11 @@ impl mpc_rpc::JsonRPCHandler for RpcApi {
     fn keygen(&self, room: String, n: u16, t: u16) -> RpcFuture<RpcResult<Point<Secp256k1>>> {
         let mut rt_service = self.rt_service.clone();
 
-        lßet(tx, rx) = futures::channel::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
 
         let mut io = BufWriter::new(vec![]);
         let mut buffer = unsigned_varint::encode::u16_buffer();
-        io.write_all(unsigned_varint::encode::u16(
-            self.parties.size(),
-            &mut buffer,
-        ))?;
+        io.write_all(unsigned_varint::encode::u16(t, &mut buffer));
 
         task::spawn(async move {
             rt_service
@@ -48,18 +46,19 @@ impl mpc_rpc::JsonRPCHandler for RpcApi {
         AsyncResult::new_boxed(rx)
     }
 
-    // fn sign(&self, _room: String, _msg: Vec<u8>) -> RpcFuture<RpcResult<()>> {
-    //     let (tx, rx) = oneshot::channel();
-    //
-    //     tx.send(Ok::<(), anyhow::Error>(vec![]));
-    //
-    //     // let background_sender = self.background.clone();
-    //     // task::spawn(async move {
-    //     //     background_sender.send(Call::Sign(msg, tx)).await;
-    //     // });
-    //
-    //     AsyncResult::new_boxed(rx)
-    // }
+    fn sign(&self, room: String, t: u16, msg: Vec<u8>) -> RpcFuture<RpcResult<SignatureRecid>> {
+        let mut rt_service = self.rt_service.clone();
+
+        let (tx, rx) = oneshot::channel();
+
+        task::spawn(async move {
+            rt_service
+                .request_computation(RoomId::from(room), t, 1, msg, tx)
+                .await;
+        });
+
+        AsyncResult::new_boxed(rx)
+    }
 }
 
 #[derive(Debug)]
@@ -84,7 +83,7 @@ impl<T: DeserializeOwned + Unpin, E: Display> Future for AsyncResult<T, E> {
                 Ok(Some(Err(e))) => {
                     return Poll::Ready(Err(RpcError {
                         code: RpcErrorCode::InternalError,
-                        message: format!("keygen computation terminated with err: {e}"),
+                        message: format!("computation terminated with err: {e}"),
                         data: None,
                     }))
                 }
@@ -92,7 +91,7 @@ impl<T: DeserializeOwned + Unpin, E: Display> Future for AsyncResult<T, E> {
                 Err(e) => {
                     return Poll::Ready(Err(RpcError {
                         code: RpcErrorCode::InternalError,
-                        message: format!("keygen computation terminated with err: {e}"),
+                        message: format!("computation terminated with err: {e}"),
                         data: None,
                     }))
                 }

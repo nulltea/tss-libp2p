@@ -1,25 +1,17 @@
 use crate::discovery::{DiscoveryBehaviour, DiscoveryOut};
 use crate::{broadcast, MessageContext, Params, RoomId};
-
 use futures::channel::mpsc;
-
 use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::identity::Keypair;
-
 use libp2p::kad::QueryId;
-
 use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess};
-
 use libp2p::swarm::NetworkBehaviourEventProcess;
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
 use libp2p::NetworkBehaviour;
 use libp2p::PeerId;
 use log::{debug, trace};
-
 use std::borrow::Cow;
-
 use std::collections::VecDeque;
-
 use std::task::{Context, Poll};
 
 const MPC_PROTOCOL_ID: &str = "/mpc/0.1.0";
