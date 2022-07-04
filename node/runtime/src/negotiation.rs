@@ -49,7 +49,7 @@ impl NegotiationChan {
         let local_peer_id = service.local_peer_id();
         Self {
             rx: Some(room_rx),
-            timeout: stream::interval(Duration::from_secs(60)),
+            timeout: stream::interval(Duration::from_secs(15)),
             agent: Some(agent),
             state: Some(NegotiationState {
                 id: room_id,
@@ -65,7 +65,9 @@ impl NegotiationChan {
     }
 
     pub fn set_peerset(&mut self, peerset: Peerset) {
-        let _ = self.state.as_mut().unwrap().cached_peerset.insert(peerset);
+        if matches!(self.agent.as_ref(), Some(agent) if agent.use_cache()) {
+            let _ = self.state.as_mut().unwrap().cached_peerset.insert(peerset);
+        }
     }
 }
 
@@ -100,8 +102,7 @@ impl Future for NegotiationChan {
                         let agent = self.agent.take().unwrap();
                         let peers_iter = peers.clone().into_iter();
                         let parties = match cached_peerset {
-                            Some(cache) => Peerset::from_cache(cache, peers_iter)
-                                .expect("no new peer_ids expected"),
+                            Some(cache) => Peerset::from_cache(cache, peers_iter),
                             None => Peerset::new(peers_iter, service.local_peer_id()),
                         };
                         let start_msg = StartMsg {

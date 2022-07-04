@@ -1,7 +1,8 @@
 use anyhow::anyhow;
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::{Sink, Stream};
 use futures_util::{SinkExt, StreamExt};
+use log::info;
 use mpc_runtime::{IncomingMessage, MessageRouting, OutgoingMessage};
 use round_based::Msg;
 use serde::de::DeserializeOwned;
@@ -19,20 +20,24 @@ where
     M: Serialize + DeserializeOwned + Debug,
 {
     let incoming = incoming.map(move |msg: IncomingMessage| {
+        let body: M = serde_json::from_slice(&*msg.body).unwrap();
+        info!("Incoming message: {:?}", body);
+
         Ok(Msg::<M> {
             sender: msg.from,
             receiver: match msg.to {
                 MessageRouting::Broadcast => None,
                 MessageRouting::PointToPoint(i) => Some(i),
             },
-            body: serde_ipld_dagcbor::from_slice(&*msg.body).unwrap(),
+            body,
         })
     });
 
     let outgoing =
         futures::sink::unfold(outgoing, move |mut outgoing, message: Msg<M>| async move {
-            let payload = serde_ipld_dagcbor::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
-
+            info!("Outgoing message: {:?}", message.body);
+            let payload = serde_json::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
+            let (tx, rx) = oneshot::channel();
             outgoing
                 .send(OutgoingMessage {
                     body: payload,
@@ -40,9 +45,12 @@ where
                         Some(remote_index) => MessageRouting::PointToPoint(remote_index),
                         None => MessageRouting::Broadcast,
                     },
+                    sent: Some(tx),
                 })
                 .await
                 .expect("channel is expected to be open");
+
+            let _ = rx.await;
 
             Ok::<_, anyhow::Error>(outgoing)
         });

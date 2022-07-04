@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use libp2p::PeerId;
+use log::warn;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 use std::ops::Index;
@@ -22,22 +23,27 @@ impl Peerset {
         }
     }
 
-    pub fn from_cache(cache: Self, peers: impl Iterator<Item = PeerId>) -> Result<Self, PeerId> {
+    pub fn from_cache(cache: Self, peers: impl Iterator<Item = PeerId>) -> Self {
         let mut session_peers = vec![];
         for peer_id in peers.sorted_by_key(|p| p.to_bytes()) {
             match cache.index_of(&peer_id) {
                 Some(i) => {
                     session_peers.push(i as usize);
                 }
-                None => return Err(peer_id),
+                None => {
+                    warn!(
+                        "Peer {} does not appear in the peerset cache, skipping.",
+                        peer_id.to_base58()
+                    )
+                }
             }
         }
 
-        Ok(Self {
+        Self {
             local_peer_id: cache.local_peer_id,
             room_peers: cache.room_peers,
             session_peers,
-        })
+        }
     }
 
     pub fn from_bytes(bytes: &[u8], local_peer_id: PeerId) -> Self {

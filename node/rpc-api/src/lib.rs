@@ -9,6 +9,7 @@ use mpc_rpc::{RpcError, RpcErrorCode, RpcFuture, RpcResult};
 
 use serde::de::DeserializeOwned;
 
+use anyhow::anyhow;
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::party_i::SignatureRecid;
 use std::fmt::{Debug, Display};
 use std::future::Future;
@@ -16,6 +17,8 @@ use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::thread::sleep;
+use std::time::Duration;
 
 pub struct RpcApi {
     rt_service: mpc_runtime::RuntimeService,
@@ -50,7 +53,6 @@ impl mpc_rpc::JsonRPCHandler for RpcApi {
         let mut rt_service = self.rt_service.clone();
 
         let (tx, rx) = oneshot::channel();
-
         task::spawn(async move {
             rt_service
                 .request_computation(RoomId::from(room), t, 1, msg, tx)
@@ -70,33 +72,32 @@ struct AsyncResult<T, E> {
 impl<T: DeserializeOwned + Unpin, E: Display> Future for AsyncResult<T, E> {
     type Output = RpcResult<T>;
 
-    fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
-        loop {
-            match self.rx.try_recv() {
-                Ok(Some(Ok(value))) => {
-                    return Poll::Ready(serde_ipld_dagcbor::from_slice(&*value).map_err(|e| RpcError {
-                        code: RpcErrorCode::InternalError,
-                        message: format!("computation finished successfully but resulted an unexpected output: {e}"),
-                        data: None,
-                    }))
-                }
-                Ok(Some(Err(e))) => {
-                    return Poll::Ready(Err(RpcError {
-                        code: RpcErrorCode::InternalError,
-                        message: format!("computation terminated with err: {e}"),
-                        data: None,
-                    }))
-                }
-                Ok(None) => {},
-                Err(e) => {
-                    return Poll::Ready(Err(RpcError {
-                        code: RpcErrorCode::InternalError,
-                        message: format!("computation terminated with err: {e}"),
-                        data: None,
-                    }))
-                }
-            };
-        }
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        return match self.rx.try_recv() {
+            Ok(Some(Ok(value))) => Poll::Ready(serde_ipld_dagcbor::from_slice(&*value).map_err(
+                |e| RpcError {
+                    code: RpcErrorCode::InternalError,
+                    message: format!(
+                        "computation finished successfully but resulted an unexpected output: {e}"
+                    ),
+                    data: None,
+                },
+            )),
+            Ok(Some(Err(e))) => Poll::Ready(Err(RpcError {
+                code: RpcErrorCode::InternalError,
+                message: format!("computation terminated with err: {e}"),
+                data: None,
+            })),
+            Ok(None) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(RpcError {
+                code: RpcErrorCode::InternalError,
+                message: format!("computation terminated with err: {e}"),
+                data: None,
+            })),
+        };
     }
 }
 

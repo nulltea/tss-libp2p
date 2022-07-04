@@ -49,7 +49,8 @@ impl RuntimeService {
                 args,
                 done,
             })
-            .await;
+            .await
+            .expect("request computation expected");
     }
 }
 
@@ -142,7 +143,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
                                     }
                                 }
                                 Entry::Vacant(_) => {
-                                    done.send(Err(anyhow!("protocol is busy")));
+                                    error!("{:?}", done.send(Err(anyhow!("protocol is busy"))));
                                 }
                             }
                         },

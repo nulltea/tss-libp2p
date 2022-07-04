@@ -19,6 +19,8 @@ pub struct OutgoingMessage {
     pub body: Vec<u8>,
 
     pub to: MessageRouting,
+
+    pub sent: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -32,6 +34,8 @@ pub trait ComputeAgentAsync: Send + Sync {
     fn session_id(&self) -> u64;
 
     fn protocol_id(&self) -> u64;
+
+    fn use_cache(&self) -> bool;
 
     fn on_done(&mut self, done: oneshot::Sender<anyhow::Result<Vec<u8>>>);
 

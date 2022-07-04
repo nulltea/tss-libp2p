@@ -106,6 +106,72 @@ impl Future for ProtocolExecution {
             n,
         } = self.state.take().unwrap();
 
+        if let Poll::Ready(Some(message)) = Stream::poll_next(Pin::new(&mut from_protocol), cx) {
+            info!("outgoing message to {:?}", message.to,);
+
+            match message.to {
+                MessageRouting::PointToPoint(remote_index) => {
+                    let (res_tx, mut res_rx) = mpsc::channel(1);
+
+                    pending_futures.push(
+                        network_service
+                            .clone()
+                            .send_message_owned(
+                                room_id.clone(),
+                                parties[remote_index - 1],
+                                MessageContext {
+                                    message_type: MessageType::Computation,
+                                    session_id,
+                                    protocol_id,
+                                },
+                                message.body,
+                                res_tx,
+                            )
+                            .boxed(),
+                    );
+
+                    // todo: handle in same Future::poll
+                    task::spawn(async move {
+                        if let Err(e) = res_rx.select_next_some().await {
+                            error!("party responded with error: {e}");
+                        } else {
+                            info!("party responded");
+                        }
+                    });
+
+                    if let Some(tx) = message.sent {
+                        let _ = tx.send(());
+                    }
+                }
+                MessageRouting::Broadcast => {
+                    let (res_tx, res_rx) = mpsc::channel((n - 1) as usize);
+
+                    pending_futures.push(
+                        network_service
+                            .clone()
+                            .multicast_message_owned(
+                                room_id.clone(),
+                                parties.clone().remotes_iter(),
+                                MessageContext {
+                                    message_type: MessageType::Coordination,
+                                    session_id,
+                                    protocol_id,
+                                },
+                                message.body.clone(),
+                                Some(res_tx),
+                            )
+                            .boxed(),
+                    );
+
+                    echo_tx.try_send(EchoMessage {
+                        sender: i + 1,
+                        payload: message.body,
+                        response: EchoResponse::Outgoing(res_rx),
+                    });
+                }
+            }
+        }
+
         loop {
             if let Poll::Ready(None) =
                 Stream::poll_next(Pin::new(&mut pending_futures).as_mut(), cx)
@@ -145,69 +211,8 @@ impl Future for ProtocolExecution {
                 },
                 body: message.payload,
             });
-        }
 
-        if let Poll::Ready(Some(message)) = Stream::poll_next(Pin::new(&mut from_protocol), cx) {
-            info!("outgoing message to {:?}", message.to);
-            let _message_round = 1; // todo: index round somehow
-
-            match message.to {
-                MessageRouting::PointToPoint(remote_index) => {
-                    let (res_tx, mut res_rx) = mpsc::channel(1);
-
-                    pending_futures.push(
-                        network_service
-                            .clone()
-                            .send_message_owned(
-                                room_id.clone(),
-                                parties[remote_index - 1],
-                                MessageContext {
-                                    message_type: MessageType::Computation,
-                                    session_id,
-                                    protocol_id,
-                                },
-                                message.body,
-                                res_tx,
-                            )
-                            .boxed(),
-                    );
-
-                    // todo: handle in same Future::poll
-                    task::spawn(async move {
-                        if let Err(e) = res_rx.select_next_some().await {
-                            error!("party responded with error: {e}");
-                        } else {
-                            info!("party responded");
-                        }
-                    });
-                }
-                MessageRouting::Broadcast => {
-                    let (res_tx, res_rx) = mpsc::channel((n - 1) as usize);
-
-                    pending_futures.push(
-                        network_service
-                            .clone()
-                            .multicast_message_owned(
-                                room_id.clone(),
-                                parties.clone().remotes_iter(),
-                                MessageContext {
-                                    message_type: MessageType::Coordination,
-                                    session_id,
-                                    protocol_id,
-                                },
-                                message.body.clone(),
-                                Some(res_tx),
-                            )
-                            .boxed(),
-                    );
-
-                    echo_tx.try_send(EchoMessage {
-                        sender: i + 1,
-                        payload: message.body,
-                        response: EchoResponse::Outgoing(res_rx),
-                    });
-                }
-            }
+            info!("going to send outgoing msgs");
         }
 
         match Future::poll(Pin::new(&mut agent_future), cx) {

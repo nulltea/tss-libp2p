@@ -4,6 +4,7 @@
     "rpc_addr": "127.0.0.1:8082"
   },
   "boot_peers": [
-    "/ip4/127.0.0.1/tcp/4000/p2p/12D3KooWDYVxd9SuhW91H5mSQ137qiJCtPmp7Lf32oew7rbA9Va7"
+    "/ip4/127.0.0.1/tcp/4000/p2p/12D3KooWDYVxd9SuhW91H5mSQ137qiJCtPmp7Lf32oew7rbA9Va7",
+    "/ip4/127.0.0.1/tcp/4003/p2p/12D3KooWBVetCYisx1DeAPcUVUr4DupTPeT2kQuvHS4PLgse66cb"
   ]
 }

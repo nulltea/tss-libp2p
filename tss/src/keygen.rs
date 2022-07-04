@@ -30,6 +30,10 @@ impl mpc_runtime::ComputeAgentAsync for KeyGen {
         0
     }
 
+    fn use_cache(&self) -> bool {
+        return false;
+    }
+
     fn on_done(&mut self, done: Sender<anyhow::Result<Vec<u8>>>) {
         let _ = self.done.insert(done);
     }

@@ -35,6 +35,10 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
         1
     }
 
+    fn use_cache(&self) -> bool {
+        return true;
+    }
+
     fn on_done(&mut self, done: oneshot::Sender<anyhow::Result<Vec<u8>>>) {
         let _ = self.done.insert(done);
     }
