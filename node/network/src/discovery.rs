@@ -17,7 +17,7 @@ use libp2p::{
     },
 };
 use libp2p::{kad::record::store::MemoryStore, mdns::Mdns};
-use log::{debug, error, trace, warn};
+use log::{debug, error, info, trace, warn};
 
 use std::collections::HashMap;
 use std::{
@@ -79,6 +79,7 @@ impl DiscoveryBehaviour {
                     kademlia.add_address(peer_id, addr.clone());
                     peers.insert(*peer_id);
                 }
+                info!("kademlia peers: {:?}", peers);
                 if let Err(e) = kademlia.bootstrap() {
                     warn!("Kademlia bootstrap failed: {}", e);
                 }

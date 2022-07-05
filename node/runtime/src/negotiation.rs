@@ -9,6 +9,7 @@ use futures::Stream;
 use futures_util::stream::FuturesOrdered;
 use futures_util::FutureExt;
 use libp2p::PeerId;
+use log::info;
 use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
 use std::borrow::BorrowMut;
 use std::collections::HashSet;
@@ -109,6 +110,12 @@ impl Future for NegotiationChan {
                             parties: parties.clone(),
                             body: args.clone(),
                         };
+                        info!(
+                            "peers selected: {:?}, parties: {:?} [{:?}]",
+                            peers,
+                            start_msg.parties.parties_indexes,
+                            start_msg.parties.clone().remotes_iter().collect::<Vec<_>>()
+                        );
                         pending_futures.push(
                             service
                                 .clone()
@@ -213,20 +220,16 @@ pub(crate) struct StartMsg {
 
 impl StartMsg {
     pub(crate) fn from_bytes(b: &[u8], local_peer_id: PeerId) -> io::Result<Self> {
-        let mut peers = vec![];
         let mut io = BufReader::new(b);
 
-        // Read the length.
-        let peerset_size = unsigned_varint::io::read_usize(&mut io)
+        // Read the peerset payload length.
+        let peerset_len = unsigned_varint::io::read_usize(&mut io)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
-        for _ in 0..peerset_size {
-            let mut buffer = [0u8; 38];
-            io.read_exact(&mut buffer)?;
-            peers.push(PeerId::from_bytes(&buffer).unwrap())
-        }
+        let mut peerset_buffer = vec![0; peerset_len];
+        io.read_exact(&mut peerset_buffer)?;
 
-        // Read the length.
+        // Read the body payload length.
         let length = unsigned_varint::io::read_usize(&mut io)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
@@ -235,7 +238,7 @@ impl StartMsg {
         io.read_exact(&mut body)?;
 
         Ok(Self {
-            parties: Peerset::new(peers.into_iter(), local_peer_id),
+            parties: Peerset::from_bytes(&*peerset_buffer, local_peer_id),
             body,
         })
     }
@@ -244,20 +247,20 @@ impl StartMsg {
         let b = vec![];
         let mut io = BufWriter::new(b);
 
-        // Read the peerset size.
+        let peerset_bytes = self.parties.to_bytes();
+
+        // Write the peerset payload size.
         {
             let mut buffer = unsigned_varint::encode::usize_buffer();
             io.write_all(unsigned_varint::encode::usize(
-                self.parties.size(),
+                peerset_bytes.len(),
                 &mut buffer,
             ))?;
         }
 
-        for peer_id in self.parties {
-            io.write_all(&*peer_id.to_bytes())?;
-        }
+        io.write_all(&*peerset_bytes)?;
 
-        // Write the length.
+        // Write the body payload length.
         {
             let mut buffer = unsigned_varint::encode::usize_buffer();
             io.write_all(unsigned_varint::encode::usize(self.body.len(), &mut buffer))?;
@@ -267,5 +270,52 @@ impl StartMsg {
         io.write_all(&self.body)?;
 
         Ok(io.buffer().to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::negotiation::StartMsg;
+    use crate::peerset::Peerset;
+    use libp2p::PeerId;
+    use std::str::FromStr;
+
+    #[test]
+    fn start_msg_encoding() {
+        let peer_ids = vec![
+            PeerId::from_str("12D3KooWMQmcJA5raTtuxqAguM5CiXRhEDumLNmZQ7PmKZizjFBX").unwrap(),
+            PeerId::from_str("12D3KooWS4jk2BXKgyqygNEZScHSzntTKQCdHYiHRrZXiNE9mNHi").unwrap(),
+            PeerId::from_str("12D3KooWHYG3YsVs9hTwbgPKVrTrPQBKc8FnDhV6bsJ4W37eds8p").unwrap(),
+        ];
+        let local_peer_id = peer_ids[0];
+        let mut peerset = Peerset::new(peer_ids.into_iter(), local_peer_id);
+        peerset.parties_indexes = vec![1, 2];
+        let start_msg = StartMsg {
+            parties: peerset.clone(),
+            body: vec![1, 2, 3],
+        };
+        let encoded = StartMsg {
+            parties: peerset,
+            body: vec![1, 2, 3],
+        }
+        .to_bytes()
+        .unwrap();
+        let decoded = StartMsg::from_bytes(&*encoded, local_peer_id).unwrap();
+
+        println!(
+            "original: {:?}, {:?}",
+            start_msg.parties.parties_indexes,
+            start_msg.parties.clone().remotes_iter().collect::<Vec<_>>()
+        );
+        println!(
+            "decoded: {:?}, {:?}",
+            decoded.parties.parties_indexes,
+            decoded.parties.clone().remotes_iter().collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            start_msg.parties.parties_indexes,
+            decoded.parties.parties_indexes
+        );
     }
 }

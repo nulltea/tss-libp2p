@@ -55,7 +55,7 @@ impl ProtocolExecution {
         let agent_future = agent.start(
             i + 1,
             parties
-                .session_peers
+                .parties_indexes
                 .iter()
                 .map(|i| (*i + 1) as u16)
                 .collect(),

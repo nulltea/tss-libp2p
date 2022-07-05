@@ -1,7 +1,7 @@
 use crate::peerset::Peerset;
 use crate::PeersetCacher;
 use anyhow::anyhow;
-use async_std::path::Path;
+use async_std::path::{Path, PathBuf};
 use libp2p::PeerId;
 use mpc_p2p::RoomId;
 use std::collections::HashMap;
@@ -33,20 +33,19 @@ impl PeersetCacher for EphemeralCacher {
 
 pub struct PersistentCacher {
     local_peer_id: PeerId,
-    path: String,
+    path: PathBuf,
 }
 
 impl PeersetCacher for PersistentCacher {
     fn read_peerset(&self, room_id: &RoomId) -> anyhow::Result<Peerset> {
-        let buf = fs::read(format!("{}/{}", self.path, room_id.as_str()))
+        let buf = fs::read(self.path.join(room_id.as_str()))
             .map_err(|e| anyhow!("error reading peerset cache file: {e}"))?;
 
         Ok(Peerset::from_bytes(&*buf, self.local_peer_id))
     }
 
     fn write_peerset(&mut self, room_id: &RoomId, peerset: Peerset) -> anyhow::Result<()> {
-        let path = format!("{}/{}", self.path, room_id.as_str());
-        let path = Path::new(&path);
+        let path = self.path.join(room_id.as_str());
         let dir = path.parent().unwrap();
         fs::create_dir_all(dir).unwrap();
         fs::write(path, peerset.to_bytes()).map_err(|e| anyhow!("error writing to file: {e}"))?;
@@ -56,9 +55,9 @@ impl PeersetCacher for PersistentCacher {
 }
 
 impl PersistentCacher {
-    pub fn new(p: String, local_peer_id: PeerId) -> Self {
+    pub fn new<P: AsRef<Path>>(p: P, local_peer_id: PeerId) -> Self {
         Self {
-            path: p,
+            path: PathBuf::from(p.as_ref()),
             local_peer_id,
         }
     }

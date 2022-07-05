@@ -12,6 +12,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::TryFutureExt;
 use futures::StreamExt;
 use futures_util::{pin_mut, FutureExt, SinkExt, TryStreamExt};
+use log::info;
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::LocalKey;
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::sign::{
     OfflineStage, SignManual,
@@ -54,6 +55,7 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
         let n = parties.len();
         let local_key = self.read_local_key()?;
 
+        info!("keysign: index ({}), parties ({:?})", i, parties);
         let state_machine = OfflineStage::new(i, parties, local_key)
             .map_err(|e| anyhow!("failed building state {e}"))?;
 
