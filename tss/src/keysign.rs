@@ -19,7 +19,7 @@ use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::sig
 };
 use round_based::{AsyncProtocol, Msg};
 
-use mpc_runtime::{IncomingMessage, OutgoingMessage};
+use mpc_runtime::{IncomingMessage, OutgoingMessage, Peerset};
 
 pub struct KeySign {
     path: String,
@@ -36,27 +36,36 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
         1
     }
 
-    fn use_cache(&self) -> bool {
-        return true;
-    }
-
     fn on_done(&mut self, done: oneshot::Sender<anyhow::Result<Vec<u8>>>) {
         let _ = self.done.insert(done);
     }
 
     async fn start(
         mut self: Box<Self>,
-        i: u16,
-        parties: Vec<u16>,
+        mut parties: Peerset,
         args: Vec<u8>,
         rt_incoming: async_channel::Receiver<IncomingMessage>,
         rt_outgoing: async_channel::Sender<OutgoingMessage>,
     ) -> anyhow::Result<()> {
+        parties.recover_from_cache().await?;
+        let i = parties.index_of(parties.local_peer_id()).unwrap() + 1;
         let n = parties.len();
+        let s_l = parties
+            .parties_indexes
+            .iter()
+            .map(|i| (*i + 1) as u16)
+            .collect();
+        info!(
+            "n={}, i={}, s_l={:?}, p={:?}",
+            n,
+            i,
+            s_l,
+            parties.clone().into_iter().collect::<Vec<_>>()
+        );
         let local_key = self.read_local_key()?;
 
-        info!("keysign: index ({}), parties ({:?})", i, parties);
-        let state_machine = OfflineStage::new(i, parties, local_key)
+        // info!("keysign: index ({}), parties ({:?})", i, parties);
+        let state_machine = OfflineStage::new(i, s_l, local_key)
             .map_err(|e| anyhow!("failed building state {e}"))?;
 
         let (incoming, outgoing) =

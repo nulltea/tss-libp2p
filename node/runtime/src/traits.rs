@@ -29,20 +29,21 @@ pub enum MessageRouting {
     PointToPoint(u16),
 }
 
+pub trait ProtocolAgentFactory {
+    fn make(&self, protocol_id: u64) -> crate::Result<Box<dyn ComputeAgentAsync>>;
+}
+
 #[async_trait::async_trait]
 pub trait ComputeAgentAsync: Send + Sync {
     fn session_id(&self) -> u64;
 
     fn protocol_id(&self) -> u64;
 
-    fn use_cache(&self) -> bool;
-
     fn on_done(&mut self, done: oneshot::Sender<anyhow::Result<Vec<u8>>>);
 
     async fn start(
         self: Box<Self>,
-        i: u16,
-        parties: Vec<u16>,
+        parties: Peerset,
         args: Vec<u8>,
         incoming: async_channel::Receiver<IncomingMessage>,
         outgoing: async_channel::Sender<OutgoingMessage>,

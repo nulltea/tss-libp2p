@@ -13,10 +13,7 @@ mod runtime;
 mod traits;
 
 pub use error::*;
+pub use peerset::*;
 pub use peerset_cacher::*;
 pub use runtime::*;
 pub use traits::*;
-
-pub trait ProtocolAgentFactory {
-    fn make(&self, protocol_id: u64) -> Result<Box<dyn ComputeAgentAsync>>;
-}

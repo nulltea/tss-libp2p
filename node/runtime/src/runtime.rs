@@ -4,7 +4,9 @@ use crate::echo::EchoGadget;
 use crate::execution::ProtocolExecution;
 use crate::negotiation::NegotiationMsg;
 use crate::peerset::Peerset;
-use crate::{coordination, ComputeAgentAsync, PeersetCacher, ProtocolAgentFactory};
+use crate::{
+    coordination, ComputeAgentAsync, PeersetCacher, PersistentCacher, ProtocolAgentFactory,
+};
 use anyhow::anyhow;
 use blake2::Digest;
 use futures::channel::{mpsc, oneshot};
@@ -54,22 +56,20 @@ impl RuntimeService {
     }
 }
 
-pub struct RuntimeDaemon<TFactory, TPeersetCacher> {
+pub struct RuntimeDaemon<TFactory> {
     network_service: NetworkService,
     rooms: HashMap<RoomId, mpsc::Receiver<broadcast::IncomingMessage>>,
     agents_factory: TFactory,
     from_service: mpsc::Receiver<RuntimeMessage>,
-    peerset_cacher: TPeersetCacher,
+    peerset_cacher: PersistentCacher,
 }
 
-impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCacher>
-    RuntimeDaemon<TFactory, TPeersetCacher>
-{
+impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
     pub fn new(
         network_service: NetworkService,
         rooms: impl Iterator<Item = (RoomId, mpsc::Receiver<broadcast::IncomingMessage>)>,
         agents_factory: TFactory,
-        peerset_cacher: TPeersetCacher,
+        peerset_cacher: PersistentCacher,
     ) -> (Self, RuntimeService) {
         let (tx, rx) = mpsc::channel(2);
 
@@ -179,17 +179,19 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
                                 room_receiver,
                                 receiver_proxy,
                                 parties,
+                                peerset_rx,
                                 init_body,
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(parties.size());
-                                peerset_cacher.write_peerset(&room_id, parties.clone()); // todo verify consistency
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     room_id,
                                     init_body,
                                     agent,
                                     network_service.clone(),
                                     parties,
+                                    peerset_rx,
+                                    peerset_cacher.clone(),
                                     room_receiver,
                                     echo_tx,
                                 )));
@@ -205,27 +207,25 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
                         n,
                         mut negotiation,
                     } => {
-                        if let Ok(peerset) = peerset_cacher.read_peerset(&id) {
-                            negotiation.set_peerset(peerset);
-                        }
-
                         match negotiation.await {
                             NegotiationMsg::Start {
                                 agent,
                                 room_receiver,
                                 receiver_proxy,
                                 parties,
+                                peerset_rx,
                                 args,
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(n as usize);
-                                peerset_cacher.write_peerset(&id, parties.clone());
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     id,
                                     args,
                                     agent,
                                     network_service.clone(),
                                     parties,
+                                    peerset_rx,
+                                    peerset_cacher.clone(),
                                     room_receiver,
                                     echo_tx,
                                 )));

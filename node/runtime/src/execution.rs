@@ -1,6 +1,6 @@
 use crate::echo::{EchoMessage, EchoResponse};
 use crate::peerset::Peerset;
-use crate::{ComputeAgentAsync, MessageRouting};
+use crate::{ComputeAgentAsync, MessageRouting, PeersetCacher, PeersetMsg, PersistentCacher};
 use anyhow::anyhow;
 use async_std::task;
 use futures::channel::mpsc;
@@ -11,6 +11,7 @@ use libp2p::PeerId;
 use log::{error, info};
 use mpc_p2p::broadcast::OutgoingResponse;
 use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
+use std::borrow::BorrowMut;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -26,12 +27,14 @@ struct ProtocolExecState {
     session_id: u64,
     network_service: NetworkService,
     parties: Peerset,
+    peerset_rx: mpsc::Receiver<PeersetMsg>,
     from_network: mpsc::Receiver<broadcast::IncomingMessage>,
     to_protocol: async_channel::Sender<crate::IncomingMessage>,
     from_protocol: async_channel::Receiver<crate::OutgoingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
     agent_future: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>,
     pending_futures: FuturesOrdered<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    cacher: PersistentCacher,
     i: u16,
     n: u16,
 }
@@ -43,26 +46,18 @@ impl ProtocolExecution {
         agent: Box<dyn ComputeAgentAsync>,
         network_service: NetworkService,
         parties: Peerset,
+        peerset_rx: mpsc::Receiver<PeersetMsg>,
+        cacher: PersistentCacher,
         from_network: mpsc::Receiver<broadcast::IncomingMessage>,
         echo_tx: mpsc::Sender<EchoMessage>,
     ) -> Self {
         let n = parties.size() as u16;
-        let i = parties.index_of(&network_service.local_peer_id()).unwrap();
+        let i = parties.index_of(parties.local_peer_id()).unwrap();
         let protocol_id = agent.protocol_id();
         let (to_protocol, from_runtime) = async_channel::bounded((n - 1) as usize);
         let (to_runtime, from_protocol) = async_channel::bounded((n - 1) as usize);
 
-        let agent_future = agent.start(
-            i + 1,
-            parties
-                .parties_indexes
-                .iter()
-                .map(|i| (*i + 1) as u16)
-                .collect(),
-            args,
-            from_runtime,
-            to_runtime,
-        );
+        let agent_future = agent.start(parties.clone(), args, from_runtime, to_runtime);
 
         Self {
             state: Some(ProtocolExecState {
@@ -72,12 +67,14 @@ impl ProtocolExecution {
                 session_id: 0,
                 network_service,
                 parties,
+                peerset_rx,
                 from_network,
                 to_protocol,
                 from_protocol,
                 echo_tx,
                 agent_future,
                 pending_futures: FuturesOrdered::new(),
+                cacher,
                 i,
                 n,
             }),
@@ -96,15 +93,28 @@ impl Future for ProtocolExecution {
             session_id,
             network_service,
             parties,
+            peerset_rx: mut from_peerset,
             mut from_network,
             mut to_protocol,
             mut from_protocol,
             mut echo_tx,
             mut agent_future,
             mut pending_futures,
+            mut cacher,
             i,
             n,
         } = self.state.take().unwrap();
+
+        if let Poll::Ready(Some(message)) = Stream::poll_next(Pin::new(&mut from_peerset), cx) {
+            match message {
+                PeersetMsg::ReadFromCache(tx) => {
+                    let _ = tx.send(cacher.read_peerset(&room_id));
+                }
+                PeersetMsg::WriteToCache(peerset, tx) => {
+                    let _ = tx.send(cacher.write_peerset(&room_id, peerset));
+                }
+            }
+        }
 
         if let Poll::Ready(Some(message)) = Stream::poll_next(Pin::new(&mut from_protocol), cx) {
             info!("outgoing message to {:?}", message.to,);
@@ -229,12 +239,14 @@ impl Future for ProtocolExecution {
                     session_id,
                     network_service,
                     parties,
+                    peerset_rx: from_peerset,
                     from_network,
                     to_protocol,
                     from_protocol,
                     echo_tx,
                     agent_future,
                     pending_futures,
+                    cacher,
                     i,
                     n,
                 });

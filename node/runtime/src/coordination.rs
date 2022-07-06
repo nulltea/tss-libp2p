@@ -1,7 +1,7 @@
 use crate::negotiation::{NegotiationChan, StartMsg};
 use crate::network_proxy::ReceiverProxy;
 use crate::peerset::Peerset;
-use crate::ComputeAgentAsync;
+use crate::{ComputeAgentAsync, PeersetMsg};
 use async_std::stream;
 use async_std::stream::Interval;
 use futures::channel::{mpsc, oneshot};
@@ -132,8 +132,18 @@ impl Future for Phase2Chan {
                         msg.payload.len(),
                         msg.payload
                     );
-                    let start_msg =
-                        StartMsg::from_bytes(&*msg.payload, self.service.local_peer_id()).unwrap();
+                    let (start_msg, peerset_rx) =
+                        match StartMsg::from_bytes(&*msg.payload, self.service.local_peer_id()) {
+                            Ok(res) => res,
+                            Err(_) => {
+                                let (ch, tx) = Phase1Channel::new(
+                                    self.id.clone(),
+                                    self.rx.take().unwrap(),
+                                    self.service.clone(),
+                                );
+                                return Poll::Ready(Phase2Msg::Abort(self.id.clone(), ch, tx));
+                            }
+                        };
                     let parties = start_msg.parties; // todo: check with cache
                     info!(
                         "parties: {:?} [{:?}]",
@@ -151,6 +161,7 @@ impl Future for Phase2Chan {
                         room_receiver: rx,
                         receiver_proxy: proxy,
                         parties,
+                        peerset_rx,
                         init_body: start_msg.body,
                     });
                 }
@@ -183,6 +194,7 @@ pub(crate) enum Phase2Msg {
         room_receiver: mpsc::Receiver<broadcast::IncomingMessage>,
         receiver_proxy: ReceiverProxy,
         parties: Peerset,
+        peerset_rx: mpsc::Receiver<PeersetMsg>,
         init_body: Vec<u8>,
     },
     Abort(RoomId, Phase1Channel, oneshot::Sender<LocalRpcMsg>),

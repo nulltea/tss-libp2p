@@ -1,7 +1,7 @@
 use crate::coordination::{LocalRpcMsg, Phase1Channel};
 use crate::network_proxy::ReceiverProxy;
 use crate::peerset::Peerset;
-use crate::ComputeAgentAsync;
+use crate::{ComputeAgentAsync, PeersetMsg};
 use async_std::stream;
 use async_std::stream::Interval;
 use futures::channel::{mpsc, oneshot};
@@ -34,7 +34,6 @@ struct NegotiationState {
     service: NetworkService,
     peers: HashSet<PeerId>,
     responses: Option<mpsc::Receiver<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
-    cached_peerset: Option<Peerset>,
     pending_futures: FuturesOrdered<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
@@ -59,15 +58,8 @@ impl NegotiationChan {
                 service,
                 peers: iter::once(local_peer_id).collect(),
                 responses: None,
-                cached_peerset: None,
                 pending_futures: Default::default(),
             }),
-        }
-    }
-
-    pub fn set_peerset(&mut self, peerset: Peerset) {
-        if matches!(self.agent.as_ref(), Some(agent) if agent.use_cache()) {
-            let _ = self.state.as_mut().unwrap().cached_peerset.insert(peerset);
         }
     }
 }
@@ -83,7 +75,6 @@ impl Future for NegotiationChan {
             service,
             mut peers,
             mut responses,
-            mut cached_peerset,
             mut pending_futures,
         } = self.state.take().unwrap();
 
@@ -102,10 +93,8 @@ impl Future for NegotiationChan {
                     if peers.len() == n as usize {
                         let agent = self.agent.take().unwrap();
                         let peers_iter = peers.clone().into_iter();
-                        let parties = match cached_peerset {
-                            Some(cache) => Peerset::from_cache(cache, peers_iter),
-                            None => Peerset::new(peers_iter, service.local_peer_id()),
-                        };
+                        let (parties, peerset_rx) =
+                            Peerset::new(peers_iter, service.local_peer_id());
                         let start_msg = StartMsg {
                             parties: parties.clone(),
                             body: args.clone(),
@@ -152,6 +141,7 @@ impl Future for NegotiationChan {
                             room_receiver,
                             receiver_proxy,
                             parties,
+                            peerset_rx,
                             args,
                         });
                     }
@@ -192,7 +182,6 @@ impl Future for NegotiationChan {
             service,
             peers,
             responses,
-            cached_peerset,
             pending_futures,
         });
 
@@ -208,6 +197,7 @@ pub(crate) enum NegotiationMsg {
         room_receiver: mpsc::Receiver<broadcast::IncomingMessage>,
         receiver_proxy: ReceiverProxy,
         parties: Peerset,
+        peerset_rx: mpsc::Receiver<PeersetMsg>,
         args: Vec<u8>,
     },
     Abort(RoomId, Phase1Channel, oneshot::Sender<LocalRpcMsg>),
@@ -219,7 +209,10 @@ pub(crate) struct StartMsg {
 }
 
 impl StartMsg {
-    pub(crate) fn from_bytes(b: &[u8], local_peer_id: PeerId) -> io::Result<Self> {
+    pub(crate) fn from_bytes(
+        b: &[u8],
+        local_peer_id: PeerId,
+    ) -> io::Result<(Self, mpsc::Receiver<PeersetMsg>)> {
         let mut io = BufReader::new(b);
 
         // Read the peerset payload length.
@@ -237,10 +230,8 @@ impl StartMsg {
         let mut body = vec![0; length];
         io.read_exact(&mut body)?;
 
-        Ok(Self {
-            parties: Peerset::from_bytes(&*peerset_buffer, local_peer_id),
-            body,
-        })
+        let (parties, rx) = Peerset::from_bytes(&*peerset_buffer, local_peer_id);
+        Ok((Self { parties, body }, rx))
     }
 
     fn to_bytes(self) -> io::Result<Vec<u8>> {
@@ -288,7 +279,7 @@ mod tests {
             PeerId::from_str("12D3KooWHYG3YsVs9hTwbgPKVrTrPQBKc8FnDhV6bsJ4W37eds8p").unwrap(),
         ];
         let local_peer_id = peer_ids[0];
-        let mut peerset = Peerset::new(peer_ids.into_iter(), local_peer_id);
+        let (mut peerset, _) = Peerset::new(peer_ids.into_iter(), local_peer_id);
         peerset.parties_indexes = vec![1, 2];
         let start_msg = StartMsg {
             parties: peerset.clone(),
@@ -300,7 +291,7 @@ mod tests {
         }
         .to_bytes()
         .unwrap();
-        let decoded = StartMsg::from_bytes(&*encoded, local_peer_id).unwrap();
+        let (decoded, _) = StartMsg::from_bytes(&*encoded, local_peer_id).unwrap();
 
         println!(
             "original: {:?}, {:?}",

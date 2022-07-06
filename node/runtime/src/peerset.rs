@@ -1,4 +1,6 @@
-use futures_util::StreamExt;
+use anyhow::anyhow;
+use futures::channel::{mpsc, oneshot};
+use futures_util::{SinkExt, StreamExt};
 use itertools::Itertools;
 use libp2p::PeerId;
 use log::{info, warn};
@@ -10,45 +12,38 @@ use std::ops::Index;
 pub struct Peerset {
     local_peer_id: PeerId,
     session_peers: Vec<PeerId>,
-    pub(crate) parties_indexes: Vec<usize>,
+    pub parties_indexes: Vec<usize>,
+    to_runtime: mpsc::Sender<PeersetMsg>,
+}
+
+pub(crate) enum PeersetMsg {
+    ReadFromCache(oneshot::Sender<anyhow::Result<Peerset>>),
+    WriteToCache(Peerset, oneshot::Sender<anyhow::Result<()>>),
 }
 
 impl Peerset {
-    pub fn new(peers: impl Iterator<Item = PeerId>, local_peer_id: PeerId) -> Self {
+    pub(crate) fn new(
+        peers: impl Iterator<Item = PeerId>,
+        local_peer_id: PeerId,
+    ) -> (Self, mpsc::Receiver<PeersetMsg>) {
+        let (tx, rx) = mpsc::channel(1);
         let peers: Vec<_> = peers.sorted_by_key(|p| p.to_bytes()).collect();
 
-        Self {
-            local_peer_id,
-            parties_indexes: (0..peers.len()).collect(),
-            session_peers: peers,
-        }
+        (
+            Self {
+                local_peer_id,
+                parties_indexes: (0..peers.len()).collect(),
+                session_peers: peers,
+                to_runtime: tx,
+            },
+            rx,
+        )
     }
 
-    pub fn from_cache(cache: Self, peers: impl Iterator<Item = PeerId>) -> Self {
-        let mut parties_indexes = vec![];
-        let session_peers = peers.collect::<Vec<_>>();
-        for peer_id in session_peers.iter().sorted_by_key(|p| p.to_bytes()) {
-            match cache.index_of(peer_id) {
-                Some(i) => {
-                    parties_indexes.push(i as usize);
-                }
-                None => {
-                    warn!(
-                        "Peer {} does not appear in the peerset cache, skipping.",
-                        peer_id.to_base58()
-                    )
-                }
-            }
-        }
-
-        Self {
-            local_peer_id: cache.local_peer_id,
-            session_peers,
-            parties_indexes,
-        }
-    }
-
-    pub fn from_bytes(bytes: &[u8], local_peer_id: PeerId) -> Self {
+    pub(crate) fn from_bytes(
+        bytes: &[u8],
+        local_peer_id: PeerId,
+    ) -> (Self, mpsc::Receiver<PeersetMsg>) {
         let mut peers = vec![];
         let mut active_indexes = vec![];
         let mut reader = BufReader::new(bytes);
@@ -68,11 +63,52 @@ impl Peerset {
 
         let peers: Vec<_> = peers.into_iter().sorted_by_key(|p| p.to_bytes()).collect();
 
-        Self {
-            local_peer_id,
-            session_peers: peers,
-            parties_indexes: active_indexes,
+        let (tx, rx) = mpsc::channel(1);
+        (
+            Self {
+                local_peer_id,
+                session_peers: peers,
+                parties_indexes: active_indexes,
+                to_runtime: tx,
+            },
+            rx,
+        )
+    }
+
+    pub async fn recover_from_cache(&mut self) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.to_runtime.send(PeersetMsg::ReadFromCache(tx)).await;
+        let cache = rx.await.expect("runtime expected to serve protocol")?;
+        info!(
+            "cache.peers={:?}, cache.indexes={:?}",
+            cache.session_peers, cache.parties_indexes
+        );
+        let mut parties_indexes = vec![];
+        for peer_id in self.session_peers.iter().sorted_by_key(|p| p.to_bytes()) {
+            match cache.index_of(peer_id) {
+                Some(i) => {
+                    parties_indexes.push(cache.parties_indexes[i as usize]);
+                }
+                None => {
+                    warn!(
+                        "Peer {} does not appear in the peerset cache, skipping.",
+                        peer_id.to_base58()
+                    )
+                }
+            }
         }
+
+        self.parties_indexes = parties_indexes;
+        Ok(())
+    }
+
+    pub async fn save_to_cache(&mut self) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .to_runtime
+            .send(PeersetMsg::WriteToCache(self.clone(), tx))
+            .await;
+        rx.await.expect("runtime expected to serve protocol")
     }
 
     pub fn index_of(&self, peer_id: &PeerId) -> Option<u16> {
@@ -104,6 +140,14 @@ impl Peerset {
             .enumerate()
             .filter(move |(i, p)| *p != self.local_peer_id)
             .map(|(i, p)| p.clone())
+    }
+
+    pub fn local_peer_id(&self) -> &PeerId {
+        return &self.local_peer_id;
+    }
+
+    pub fn len(&self) -> usize {
+        self.session_peers.len()
     }
 }
 
@@ -137,10 +181,10 @@ mod tests {
             PeerId::from_str("12D3KooWHYG3YsVs9hTwbgPKVrTrPQBKc8FnDhV6bsJ4W37eds8p").unwrap(),
         ];
         let local_peer_id = peer_ids[0];
-        let mut peerset = Peerset::new(peer_ids.into_iter(), local_peer_id);
+        let (mut peerset, _) = Peerset::new(peer_ids.into_iter(), local_peer_id);
         peerset.parties_indexes = vec![0, 2];
         let encoded = peerset.to_bytes();
-        let decoded = Peerset::from_bytes(&*encoded, local_peer_id);
+        let (decoded, _) = Peerset::from_bytes(&*encoded, local_peer_id);
 
         println!(
             "original: {:?}, {:?}",

@@ -31,6 +31,7 @@ impl PeersetCacher for EphemeralCacher {
     }
 }
 
+#[derive(Clone)]
 pub struct PersistentCacher {
     local_peer_id: PeerId,
     path: PathBuf,
@@ -41,7 +42,9 @@ impl PeersetCacher for PersistentCacher {
         let buf = fs::read(self.path.join(room_id.as_str()))
             .map_err(|e| anyhow!("error reading peerset cache file: {e}"))?;
 
-        Ok(Peerset::from_bytes(&*buf, self.local_peer_id))
+        let (peerset, _) = Peerset::from_bytes(&*buf, self.local_peer_id);
+
+        Ok(peerset)
     }
 
     fn write_peerset(&mut self, room_id: &RoomId, peerset: Peerset) -> anyhow::Result<()> {

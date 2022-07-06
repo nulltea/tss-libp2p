@@ -5,7 +5,8 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::TryFutureExt;
 use futures::StreamExt;
 use futures_util::{pin_mut, FutureExt, SinkExt};
-use mpc_runtime::{IncomingMessage, OutgoingMessage};
+use log::info;
+use mpc_runtime::{IncomingMessage, OutgoingMessage, Peerset, PeersetCacher};
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::{
     Keygen, LocalKey,
 };
@@ -30,27 +31,30 @@ impl mpc_runtime::ComputeAgentAsync for KeyGen {
         0
     }
 
-    fn use_cache(&self) -> bool {
-        return false;
-    }
-
     fn on_done(&mut self, done: Sender<anyhow::Result<Vec<u8>>>) {
         let _ = self.done.insert(done);
     }
 
     async fn start(
         mut self: Box<Self>,
-        i: u16,
-        parties: Vec<u16>,
+        mut parties: Peerset,
         args: Vec<u8>,
         incoming: async_channel::Receiver<IncomingMessage>,
         outgoing: async_channel::Sender<OutgoingMessage>,
     ) -> anyhow::Result<()> {
+        let n = parties.len() as u16;
+        let i = parties.index_of(parties.local_peer_id()).unwrap() + 1;
+        info!(
+            "n={}, i={}, p={:?}",
+            n,
+            i,
+            parties.clone().into_iter().collect::<Vec<_>>()
+        );
         let mut io = BufReader::new(&*args);
         let t = unsigned_varint::io::read_u16(&mut io).unwrap();
 
-        let state_machine = Keygen::new(i, t, parties.len() as u16)
-            .map_err(|e| anyhow!("failed building state {e}"))?;
+        let state_machine =
+            Keygen::new(i, t, n).map_err(|e| anyhow!("failed building state {e}"))?;
 
         let (incoming, outgoing) = crate::round_based::state_replication(incoming, outgoing);
 
@@ -63,6 +67,7 @@ impl mpc_runtime::ComputeAgentAsync for KeyGen {
             .map_err(|e| anyhow!("protocol execution terminated with error: {e}"))?;
 
         let pk = self.save_local_key(res)?;
+        parties.save_to_cache().await?;
 
         if let Some(tx) = self.done.take() {
             let pk_bytes = serde_ipld_dagcbor::to_vec(&pk)
