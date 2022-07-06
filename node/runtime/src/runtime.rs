@@ -25,7 +25,7 @@ pub enum RuntimeMessage {
         n: u16,
         protocol_id: u64,
         args: Vec<u8>,
-        done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
+        on_done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
     },
 }
 
@@ -41,7 +41,7 @@ impl RuntimeService {
         n: u16,
         protocol_id: u64,
         args: Vec<u8>,
-        done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
+        on_done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
     ) {
         self.to_runtime
             .send(RuntimeMessage::RequestComputation {
@@ -49,7 +49,7 @@ impl RuntimeService {
                 n,
                 protocol_id,
                 args,
-                done,
+                on_done,
             })
             .await
             .expect("request computation expected");
@@ -122,28 +122,27 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                             n,
                             protocol_id,
                             args,
-                            done,
+                            on_done,
                         } => {
                             match rooms_rpc.entry(room_id) {
                                 Entry::Occupied(e) => {
                                     let mut agent = match agents_factory.make(protocol_id) {
                                         Ok(a) => a,
                                         Err(_) => {
-                                            done.send(Err(anyhow!("unknown protocol")));
+                                            on_done.send(Err(anyhow!("unknown protocol")));
                                             continue;
                                         }
                                     };
                                     let on_rpc = e.remove();
 
                                     if on_rpc.is_canceled() {
-                                        done.send(Err(anyhow!("protocol is busy")));
+                                        on_done.send(Err(anyhow!("protocol is busy")));
                                     } else {
-                                        agent.on_done(done);
-                                        on_rpc.send(LocalRpcMsg{n, args, agent});
+                                        on_rpc.send(LocalRpcMsg{n, args, agent, on_done});
                                     }
                                 }
                                 Entry::Vacant(_) => {
-                                    error!("{:?}", done.send(Err(anyhow!("protocol is busy"))));
+                                    error!("{:?}", on_done.send(Err(anyhow!("protocol is busy"))));
                                 }
                             }
                         },
@@ -194,6 +193,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                                     peerset_cacher.clone(),
                                     room_receiver,
                                     echo_tx,
+                                    None,
                                 )));
                             }
                             Phase2Msg::Abort(room_id, ch, tx) => {
@@ -210,6 +210,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                         match negotiation.await {
                             NegotiationMsg::Start {
                                 agent,
+                                on_done,
                                 room_receiver,
                                 receiver_proxy,
                                 parties,
@@ -228,6 +229,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                                     peerset_cacher.clone(),
                                     room_receiver,
                                     echo_tx,
+                                    Some(on_done),
                                 )));
                             }
                             NegotiationMsg::Abort(room_id, phase1, rpc_tx) => {

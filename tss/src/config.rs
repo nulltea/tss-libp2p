@@ -44,7 +44,7 @@ where
     let path = setup_path.as_ref().replace(":id", &*peer_id.to_base58());
     let path = Path::new(&path);
     let dir = path.parent().unwrap();
-    std::fs::create_dir_all(dir).unwrap();
+    fs::create_dir_all(dir).unwrap();
     NodeKeyConfig::persist(keypair, path)
         .map_err(|e| anyhow!("secret key backup failed with err: {}", e))?;
     let multiaddr = Multiaddr::from_str(libp2p_addr.as_ref())

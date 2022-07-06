@@ -39,15 +39,13 @@ pub trait ComputeAgentAsync: Send + Sync {
 
     fn protocol_id(&self) -> u64;
 
-    fn on_done(&mut self, done: oneshot::Sender<anyhow::Result<Vec<u8>>>);
-
-    async fn start(
+    async fn compute(
         self: Box<Self>,
         parties: Peerset,
         args: Vec<u8>,
         incoming: async_channel::Receiver<IncomingMessage>,
         outgoing: async_channel::Sender<OutgoingMessage>,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<Vec<u8>>;
 }
 
 pub trait PeersetCacher {

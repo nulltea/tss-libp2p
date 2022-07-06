@@ -103,7 +103,7 @@ impl NetworkWorker {
         let behaviour = {
             match Behaviour::new(&keypair, broadcast_protocols, params.clone()) {
                 Ok(b) => b,
-                Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
+                Err(broadcast::RegisterError::DuplicateProtocol(proto)) => {
                     return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
                 }
             }
@@ -230,7 +230,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::Broadcast(payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn broadcast_message_owned(
@@ -246,7 +247,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::Broadcast(payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn multicast_message(
@@ -263,7 +265,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::Multicast(peer_ids.collect(), payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn multicast_message_owned(
@@ -280,7 +283,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::Multicast(peer_ids.collect(), payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn send_message(
@@ -297,7 +301,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::SendDirect(peer_id, payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn send_message_owned(
@@ -314,7 +319,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::SendDirect(peer_id, payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub fn local_peer_id(&self) -> PeerId {

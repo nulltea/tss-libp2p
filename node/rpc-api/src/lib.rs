@@ -38,7 +38,7 @@ impl mpc_rpc::JsonRPCHandler for RpcApi {
 
         let mut io = BufWriter::new(vec![]);
         let mut buffer = unsigned_varint::encode::u16_buffer();
-        io.write_all(unsigned_varint::encode::u16(t, &mut buffer));
+        let _ = io.write_all(unsigned_varint::encode::u16(t, &mut buffer));
 
         task::spawn(async move {
             rt_service

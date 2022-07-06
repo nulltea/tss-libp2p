@@ -35,6 +35,7 @@ struct NegotiationState {
     peers: HashSet<PeerId>,
     responses: Option<mpsc::Receiver<Result<(PeerId, Vec<u8>), broadcast::RequestFailure>>>,
     pending_futures: FuturesOrdered<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    on_done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
 }
 
 impl NegotiationChan {
@@ -45,6 +46,7 @@ impl NegotiationChan {
         args: Vec<u8>,
         service: NetworkService,
         agent: Box<dyn ComputeAgentAsync>,
+        on_done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
     ) -> Self {
         let local_peer_id = service.local_peer_id();
         Self {
@@ -59,6 +61,7 @@ impl NegotiationChan {
                 peers: iter::once(local_peer_id).collect(),
                 responses: None,
                 pending_futures: Default::default(),
+                on_done,
             }),
         }
     }
@@ -76,6 +79,7 @@ impl Future for NegotiationChan {
             mut peers,
             mut responses,
             mut pending_futures,
+            on_done,
         } = self.state.take().unwrap();
 
         loop {
@@ -138,6 +142,7 @@ impl Future for NegotiationChan {
                         );
                         return Poll::Ready(NegotiationMsg::Start {
                             agent,
+                            on_done,
                             room_receiver,
                             receiver_proxy,
                             parties,
@@ -183,6 +188,7 @@ impl Future for NegotiationChan {
             peers,
             responses,
             pending_futures,
+            on_done,
         });
 
         // Wake this task to be polled again.
@@ -194,6 +200,7 @@ impl Future for NegotiationChan {
 pub(crate) enum NegotiationMsg {
     Start {
         agent: Box<dyn ComputeAgentAsync>,
+        on_done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
         room_receiver: mpsc::Receiver<broadcast::IncomingMessage>,
         receiver_proxy: ReceiverProxy,
         parties: Peerset,

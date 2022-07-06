@@ -69,7 +69,13 @@ impl Future for Phase1Channel {
             _ => {}
         }
 
-        if let Some(LocalRpcMsg { n, args, agent }) = self.on_local_rpc.try_recv().unwrap() {
+        if let Some(LocalRpcMsg {
+            n,
+            args,
+            agent,
+            on_done,
+        }) = self.on_local_rpc.try_recv().unwrap()
+        {
             return Poll::Ready(Phase1Msg::FromLocal {
                 id: self.id.clone(),
                 n,
@@ -80,6 +86,7 @@ impl Future for Phase1Channel {
                     args,
                     self.service.clone(),
                     agent,
+                    on_done,
                 ),
             });
         }
@@ -204,4 +211,5 @@ pub(crate) struct LocalRpcMsg {
     pub n: u16,
     pub args: Vec<u8>,
     pub agent: Box<dyn ComputeAgentAsync>,
+    pub on_done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
 }

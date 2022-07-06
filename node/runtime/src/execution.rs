@@ -3,12 +3,12 @@ use crate::peerset::Peerset;
 use crate::{ComputeAgentAsync, MessageRouting, PeersetCacher, PeersetMsg, PersistentCacher};
 use anyhow::anyhow;
 use async_std::task;
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::Stream;
 use futures_util::stream::FuturesOrdered;
 use futures_util::{FutureExt, StreamExt};
 use libp2p::PeerId;
-use log::{error, info};
+use log::{error, info, warn};
 use mpc_p2p::broadcast::OutgoingResponse;
 use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
 use std::borrow::BorrowMut;
@@ -32,9 +32,10 @@ struct ProtocolExecState {
     to_protocol: async_channel::Sender<crate::IncomingMessage>,
     from_protocol: async_channel::Receiver<crate::OutgoingMessage>,
     echo_tx: mpsc::Sender<EchoMessage>,
-    agent_future: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>,
+    agent_future: Pin<Box<dyn Future<Output = anyhow::Result<Vec<u8>>> + Send>>,
     pending_futures: FuturesOrdered<Pin<Box<dyn Future<Output = ()> + Send>>>,
     cacher: PersistentCacher,
+    on_done: Option<oneshot::Sender<anyhow::Result<Vec<u8>>>>,
     i: u16,
     n: u16,
 }
@@ -50,6 +51,7 @@ impl ProtocolExecution {
         cacher: PersistentCacher,
         from_network: mpsc::Receiver<broadcast::IncomingMessage>,
         echo_tx: mpsc::Sender<EchoMessage>,
+        on_done: Option<oneshot::Sender<anyhow::Result<Vec<u8>>>>,
     ) -> Self {
         let n = parties.size() as u16;
         let i = parties.index_of(parties.local_peer_id()).unwrap();
@@ -57,7 +59,7 @@ impl ProtocolExecution {
         let (to_protocol, from_runtime) = async_channel::bounded((n - 1) as usize);
         let (to_runtime, from_protocol) = async_channel::bounded((n - 1) as usize);
 
-        let agent_future = agent.start(parties.clone(), args, from_runtime, to_runtime);
+        let agent_future = agent.compute(parties.clone(), args, from_runtime, to_runtime);
 
         Self {
             state: Some(ProtocolExecState {
@@ -75,6 +77,7 @@ impl ProtocolExecution {
                 agent_future,
                 pending_futures: FuturesOrdered::new(),
                 cacher,
+                on_done,
                 i,
                 n,
             }),
@@ -101,6 +104,7 @@ impl Future for ProtocolExecution {
             mut agent_future,
             mut pending_futures,
             mut cacher,
+            on_done,
             i,
             n,
         } = self.state.take().unwrap();
@@ -173,11 +177,13 @@ impl Future for ProtocolExecution {
                             .boxed(),
                     );
 
-                    echo_tx.try_send(EchoMessage {
-                        sender: i + 1,
-                        payload: message.body,
-                        response: EchoResponse::Outgoing(res_rx),
-                    });
+                    echo_tx
+                        .try_send(EchoMessage {
+                            sender: i + 1,
+                            payload: message.body,
+                            response: EchoResponse::Outgoing(res_rx),
+                        })
+                        .expect("echo channel is expected to be open");
                 }
             }
         }
@@ -200,39 +206,45 @@ impl Future for ProtocolExecution {
                         payload: message.payload.clone(),
                         response: EchoResponse::Incoming(message.pending_response),
                     })
-                    .map_err(|_e| anyhow!("echo send expected")); // todo: error handling
+                    .expect("echo channel is expected to be open");
             } else {
-                message
-                    .pending_response
-                    .send(OutgoingResponse {
-                        result: Ok(vec![]),
-                        sent_feedback: None,
-                    })
-                    .map_err(|_e| anyhow!("acknowledgement failed with error"));
-                // todo: error handling
+                if let Err(_) = message.pending_response.send(OutgoingResponse {
+                    result: Ok(vec![]),
+                    sent_feedback: None,
+                }) {
+                    warn!("failed sending acknowledgement to remote");
+                }
             }
 
-            to_protocol.try_send(crate::IncomingMessage {
-                from: message.peer_index + 1,
-                to: if message.is_broadcast {
-                    MessageRouting::Broadcast
-                } else {
-                    MessageRouting::PointToPoint(i + 1)
-                },
-                body: message.payload,
-            });
-
-            info!("going to send outgoing msgs");
+            to_protocol
+                .try_send(crate::IncomingMessage {
+                    from: message.peer_index + 1,
+                    to: if message.is_broadcast {
+                        MessageRouting::Broadcast
+                    } else {
+                        MessageRouting::PointToPoint(i + 1)
+                    },
+                    body: message.payload,
+                })
+                .expect("application channel is expected to be open");
         }
 
         match Future::poll(Pin::new(&mut agent_future), cx) {
-            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+            Poll::Ready(Ok(res)) => {
+                if let Some(tx) = on_done {
+                    let _ = tx.send(Ok(res));
+                }
+                Poll::Ready(Ok(()))
+            }
             Poll::Ready(Err(e)) => {
-                error!("error: {e}");
-                Poll::Ready(Err(crate::Error::InternalError(e)))
+                let err = anyhow!("{e}");
+                if let Some(tx) = on_done {
+                    let _ = tx.send(Err(e));
+                }
+                Poll::Ready(Err(crate::Error::InternalError(err)))
             }
             Poll::Pending => {
-                self.state.insert(ProtocolExecState {
+                let _ = self.state.insert(ProtocolExecState {
                     room_id,
                     local_peer_id,
                     protocol_id,
@@ -247,6 +259,7 @@ impl Future for ProtocolExecution {
                     agent_future,
                     pending_futures,
                     cacher,
+                    on_done,
                     i,
                     n,
                 });

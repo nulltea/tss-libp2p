@@ -18,7 +18,6 @@ use std::path::Path;
 
 pub struct KeyGen {
     path: String,
-    done: Option<oneshot::Sender<anyhow::Result<Vec<u8>>>>,
 }
 
 #[async_trait::async_trait]
@@ -31,17 +30,13 @@ impl mpc_runtime::ComputeAgentAsync for KeyGen {
         0
     }
 
-    fn on_done(&mut self, done: Sender<anyhow::Result<Vec<u8>>>) {
-        let _ = self.done.insert(done);
-    }
-
-    async fn start(
+    async fn compute(
         mut self: Box<Self>,
         mut parties: Peerset,
         args: Vec<u8>,
         incoming: async_channel::Receiver<IncomingMessage>,
         outgoing: async_channel::Sender<OutgoingMessage>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<u8>> {
         let n = parties.len() as u16;
         let i = parties.index_of(parties.local_peer_id()).unwrap() + 1;
         info!(
@@ -69,23 +64,16 @@ impl mpc_runtime::ComputeAgentAsync for KeyGen {
         let pk = self.save_local_key(res)?;
         parties.save_to_cache().await?;
 
-        if let Some(tx) = self.done.take() {
-            let pk_bytes = serde_ipld_dagcbor::to_vec(&pk)
-                .map_err(|e| anyhow!("error encoding public key {e}"))?;
-            tx.send(Ok(pk_bytes))
-                .expect("channel is expected to be open");
-        };
+        let pk_bytes = serde_ipld_dagcbor::to_vec(&pk)
+            .map_err(|e| anyhow!("error encoding public key {e}"))?;
 
-        Ok(())
+        Ok(pk_bytes)
     }
 }
 
 impl KeyGen {
     pub fn new(p: &str) -> Self {
-        Self {
-            path: p.to_owned(),
-            done: None,
-        }
+        Self { path: p.to_owned() }
     }
 
     fn save_local_key(&self, local_key: LocalKey<Secp256k1>) -> anyhow::Result<Point<Secp256k1>> {

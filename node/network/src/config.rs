@@ -236,7 +236,7 @@ where
     E: Error + Send + Sync + 'static,
     W: Fn(&K) -> Vec<u8>,
 {
-    std::fs::read(&file)
+    fs::read(&file)
         .and_then(|mut sk_bytes| {
             parse(&mut sk_bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })

@@ -22,7 +22,7 @@ impl JsonRPCServer {
         Ok(Self { server })
     }
 
-    pub async fn run(self) -> std::result::Result<(), anyhow::Error> {
+    pub async fn run(self) -> Result<(), anyhow::Error> {
         self.server
             .wait()
             .map_err(|e| anyhow!("running json rpc server terminated with err: {:?}", e))

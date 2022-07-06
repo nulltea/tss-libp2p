@@ -210,9 +210,7 @@ struct BroadcastMessage {
     request: WireMessage,
     channel: ResponseChannel<Result<Vec<u8>, ()>>,
     protocol: String,
-    resp_builder: Option<futures::channel::mpsc::Sender<IncomingMessage>>,
-    // Once we get incoming request we save all params, create an async call to Peerset
-    // to get the reputation of the peer.
+    resp_builder: Option<mpsc::Sender<IncomingMessage>>,
     get_peer_index: Pin<Box<dyn Future<Output = Result<u16, ()>> + Send>>,
 }
 

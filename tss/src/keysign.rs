@@ -23,7 +23,6 @@ use mpc_runtime::{IncomingMessage, OutgoingMessage, Peerset};
 
 pub struct KeySign {
     path: String,
-    done: Option<oneshot::Sender<anyhow::Result<Vec<u8>>>>,
 }
 
 #[async_trait::async_trait]
@@ -36,17 +35,13 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
         1
     }
 
-    fn on_done(&mut self, done: oneshot::Sender<anyhow::Result<Vec<u8>>>) {
-        let _ = self.done.insert(done);
-    }
-
-    async fn start(
+    async fn compute(
         mut self: Box<Self>,
         mut parties: Peerset,
         args: Vec<u8>,
         rt_incoming: async_channel::Receiver<IncomingMessage>,
         rt_outgoing: async_channel::Sender<OutgoingMessage>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<u8>> {
         parties.recover_from_cache().await?;
         let i = parties.index_of(parties.local_peer_id()).unwrap() + 1;
         let n = parties.len();
@@ -55,16 +50,8 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
             .iter()
             .map(|i| (*i + 1) as u16)
             .collect();
-        info!(
-            "n={}, i={}, s_l={:?}, p={:?}",
-            n,
-            i,
-            s_l,
-            parties.clone().into_iter().collect::<Vec<_>>()
-        );
         let local_key = self.read_local_key()?;
 
-        // info!("keysign: index ({}), parties ({:?})", i, parties);
         let state_machine = OfflineStage::new(i, s_l, local_key)
             .map_err(|e| anyhow!("failed building state {e}"))?;
 
@@ -102,23 +89,16 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
 
         let sig = signing.complete(&partial_signatures)?;
 
-        if let Some(tx) = self.done.take() {
-            let signature_bytes = serde_ipld_dagcbor::to_vec(&sig)
-                .map_err(|e| anyhow!("error encoding signature {e}"))?;
-            tx.send(Ok(signature_bytes))
-                .expect("channel is expected to be open");
-        }
+        let signature_bytes = serde_ipld_dagcbor::to_vec(&sig)
+            .map_err(|e| anyhow!("error encoding signature {e}"))?;
 
-        Ok(())
+        Ok(signature_bytes)
     }
 }
 
 impl KeySign {
     pub fn new(p: &str) -> Self {
-        Self {
-            path: p.to_owned(),
-            done: None,
-        }
+        Self { path: p.to_owned() }
     }
 
     fn read_local_key(&self) -> anyhow::Result<LocalKey<Secp256k1>> {
