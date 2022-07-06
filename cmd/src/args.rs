@@ -29,8 +29,11 @@ pub struct DeployArgs {
     #[options(help = "path to parties config")]
     pub config_path: String,
 
-    #[options(help = "path to peer's private_key")]
-    pub private_key: String,
+    #[options(
+        help = "path to setup directory (where secret key saved)",
+        default = "./data/:id/"
+    )]
+    pub path: String,
 
     #[options(help = "peer discovery with Kad-DHT")]
     pub kademlia: bool,
@@ -49,8 +52,11 @@ pub struct SetupArgs {
     #[options(help = "rpc address", default = "127.0.0.1:8080")]
     pub rpc_address: String,
 
-    #[options(help = "rpc address", default = "./config.json")]
+    #[options(help = "path to configuration", default = "./config.json")]
     pub config_path: String,
+
+    #[options(help = "path to setup artifacts", default = "./data/:id/")]
+    pub path: String,
 }
 
 #[derive(Debug, Options, Clone)]

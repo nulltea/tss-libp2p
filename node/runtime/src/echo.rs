@@ -68,11 +68,11 @@ impl EchoGadget {
         let mut outgoing_resp_rx = None;
 
         while let Some(echo_msg) = self.msgs.pop() {
-            hasher.write(&*echo_msg.payload);
+            let _ = hasher.write(&*echo_msg.payload);
             match echo_msg.response {
                 EchoResponse::Incoming(tx) => incoming_acks.push(tx),
                 EchoResponse::Outgoing(resp_rx) => {
-                    outgoing_resp_rx.insert(resp_rx);
+                    let _ = outgoing_resp_rx.insert(resp_rx);
                 }
             }
         }
@@ -84,7 +84,8 @@ impl EchoGadget {
             tx.send(broadcast::OutgoingResponse {
                 result: Ok(echo_hash.clone()),
                 sent_feedback: None,
-            });
+            })
+            .expect("expected to be able to send acknowledgment with echoing module");
         }
 
         let mut echo_hashes = vec![];

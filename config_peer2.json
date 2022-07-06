@@ -1,9 +1,10 @@
 {
   "local": {
-    "network_peer": "/ip4/127.0.0.1/tcp/4002/p2p/12D3KooWJJM7NBXH5BMi5fyQQ46cZAasBudcAi1NqnwkRsGe4FyH",
+    "network_peer": "/ip4/127.0.0.1/tcp/4002/p2p/12D3KooWHYG3YsVs9hTwbgPKVrTrPQBKc8FnDhV6bsJ4W37eds8p",
     "rpc_addr": "127.0.0.1:8082"
   },
   "boot_peers": [
-    "/ip4/127.0.0.1/tcp/4000/p2p/12D3KooWDYVxd9SuhW91H5mSQ137qiJCtPmp7Lf32oew7rbA9Va7"
+    "/ip4/127.0.0.1/tcp/4000/p2p/12D3KooWMQmcJA5raTtuxqAguM5CiXRhEDumLNmZQ7PmKZizjFBX",
+    "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWS4jk2BXKgyqygNEZScHSzntTKQCdHYiHRrZXiNE9mNHi"
   ]
 }

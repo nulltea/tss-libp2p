@@ -29,6 +29,7 @@ pub struct PartyConfig {
 
 pub fn generate_config<P: AsRef<Path>, S: AsRef<str>>(
     cfg_path: P,
+    setup_path: S,
     libp2p_addr: S,
     rpc_addr: S,
 ) -> Result<Config, anyhow::Error>
@@ -40,14 +41,14 @@ where
         .into_keypair()
         .map_err(|e| anyhow!("keypair generating err: {}", e))?;
     let peer_id = PeerId::from(keypair.public());
-    let path = format!("./data/{}/secret.key", peer_id.to_base58());
+    let path = setup_path.as_ref().replace(":id", &*peer_id.to_base58());
     let path = Path::new(&path);
     let dir = path.parent().unwrap();
-    std::fs::create_dir_all(dir).unwrap();
+    fs::create_dir_all(dir).unwrap();
     NodeKeyConfig::persist(keypair, path)
         .map_err(|e| anyhow!("secret key backup failed with err: {}", e))?;
     let multiaddr = Multiaddr::from_str(libp2p_addr.as_ref())
-        .map_err(|e| anyhow!("multiaddr parce err: {}", e))?;
+        .map_err(|e| anyhow!("multiaddr parse err: {}", e))?;
     let network_peer = MultiaddrWithPeerId { multiaddr, peer_id };
 
     let config = Config {

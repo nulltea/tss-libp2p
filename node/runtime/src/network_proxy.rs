@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 
 pub(crate) struct ReceiverProxy {
     id: RoomId,
-    rx: Option<mpsc::Receiver<broadcast::IncomingMessage>>,
+    rx: Option<mpsc::Receiver<IncomingMessage>>,
     tx: mpsc::Sender<broadcast::IncomingMessage>,
     service: NetworkService,
     parties: Peerset,
@@ -18,7 +18,7 @@ pub(crate) struct ReceiverProxy {
 impl ReceiverProxy {
     pub fn new(
         room_id: RoomId,
-        room_rx: mpsc::Receiver<broadcast::IncomingMessage>,
+        room_rx: mpsc::Receiver<IncomingMessage>,
         service: NetworkService,
         parties: Peerset,
     ) -> (Self, mpsc::Receiver<IncomingMessage>) {
@@ -53,7 +53,7 @@ impl Future for ReceiverProxy {
             Ok(Some(mut msg)) => match self.parties.index_of(&msg.peer_id) {
                 Some(i) => {
                     msg.peer_index = i;
-                    self.tx.try_send(msg);
+                    let _ = self.tx.try_send(msg);
                 }
                 None => {
                     panic!("received message from unknown peer");

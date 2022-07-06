@@ -8,13 +8,15 @@ use async_std::task;
 use futures::future::{FutureExt, TryFutureExt};
 use futures::StreamExt;
 use gumdrop::Options;
+
 use mpc_api::RpcApi;
 use mpc_p2p::{NetworkWorker, NodeKeyConfig, Params, RoomArgs, Secret};
 use mpc_rpc::server::JsonRPCServer;
-use mpc_runtime::{EphemeralCacher, PersistentCacher, RuntimeDaemon};
+use mpc_runtime::{PersistentCacher, RuntimeDaemon};
 use mpc_tss::{generate_config, Config, TssFactory};
 use sha3::Digest;
 use std::error::Error;
+use std::path::Path;
 use std::{iter, process};
 
 #[tokio::main]
@@ -39,14 +41,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn setup(args: SetupArgs) -> Result<(), anyhow::Error> {
-    generate_config(args.config_path, args.multiaddr, args.rpc_address).map(|_| ())
+    generate_config(
+        args.config_path,
+        args.path,
+        args.multiaddr,
+        args.rpc_address,
+    )
+    .map(|_| ())
 }
 
 async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
-    let node_key = NodeKeyConfig::Ed25519(Secret::File(args.private_key.into()).into());
-
     let config = Config::load_config(&args.config_path)?;
     let local_party = config.local.clone();
+    let local_peer_id = local_party.network_peer.peer_id;
+    let path_str = args
+        .path
+        .to_string()
+        .replace(":id", &*local_peer_id.to_base58());
+    let base_path = Path::new(&path_str);
+    let node_key = NodeKeyConfig::Ed25519(Secret::File(base_path.join("secret.key")).into());
 
     let boot_peers: Vec<_> = config.boot_peers.iter().map(|p| p.clone()).collect();
 
@@ -77,10 +90,7 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         net_service,
         iter::once((room_id, room_rx)),
         TssFactory::new(format!("data/{}/key.share", local_peer_id.to_base58())),
-        PersistentCacher::new(
-            format!("data/{}/peersets", local_peer_id.to_base58()),
-            local_peer_id.clone(),
-        ),
+        PersistentCacher::new(base_path.join("peerset"), local_peer_id.clone()),
     );
 
     let rt_task = task::spawn(async {
@@ -98,7 +108,7 @@ async fn deploy(args: DeployArgs) -> Result<(), anyhow::Error> {
         .map_err(|e| anyhow!("json rpc server terminated with err: {}", e))?
     };
 
-    rpc_server.run().await;
+    rpc_server.run().await.expect("expected RPC server to run");
 
     let _ = rt_task.cancel().await;
     let _ = net_task.cancel().await;

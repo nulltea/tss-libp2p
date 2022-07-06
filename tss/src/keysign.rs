@@ -1,28 +1,26 @@
 use std::fs;
-use std::fs::File;
-use std::hash::Hasher;
-use std::io::{BufReader, Read, Write};
-use std::path::Path;
+
+use std::io::Read;
 
 use anyhow::anyhow;
 use curv::arithmetic::Converter;
-use curv::elliptic::curves::{Point, Secp256k1};
+use curv::elliptic::curves::Secp256k1;
 use curv::BigInt;
-use futures::channel::{mpsc, oneshot};
+
 use futures::future::TryFutureExt;
 use futures::StreamExt;
 use futures_util::{pin_mut, FutureExt, SinkExt, TryStreamExt};
+
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::LocalKey;
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::sign::{
     OfflineStage, SignManual,
 };
 use round_based::{AsyncProtocol, Msg};
 
-use mpc_runtime::{IncomingMessage, OutgoingMessage};
+use mpc_runtime::{IncomingMessage, OutgoingMessage, Peerset};
 
 pub struct KeySign {
     path: String,
-    done: Option<oneshot::Sender<anyhow::Result<Vec<u8>>>>,
 }
 
 #[async_trait::async_trait]
@@ -35,22 +33,24 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
         1
     }
 
-    fn on_done(&mut self, done: oneshot::Sender<anyhow::Result<Vec<u8>>>) {
-        let _ = self.done.insert(done);
-    }
-
-    async fn start(
+    async fn compute(
         mut self: Box<Self>,
-        i: u16,
-        parties: Vec<u16>,
+        mut parties: Peerset,
         args: Vec<u8>,
         rt_incoming: async_channel::Receiver<IncomingMessage>,
         rt_outgoing: async_channel::Sender<OutgoingMessage>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<u8>> {
+        parties.recover_from_cache().await?;
+        let i = parties.index_of(parties.local_peer_id()).unwrap() + 1;
         let n = parties.len();
+        let s_l = parties
+            .parties_indexes
+            .iter()
+            .map(|i| (*i + 1) as u16)
+            .collect();
         let local_key = self.read_local_key()?;
 
-        let state_machine = OfflineStage::new(i, parties, local_key)
+        let state_machine = OfflineStage::new(i, s_l, local_key)
             .map_err(|e| anyhow!("failed building state {e}"))?;
 
         let (incoming, outgoing) =
@@ -77,7 +77,7 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
                 body: partial_signature,
             })
             .await
-            .map_err(|e| anyhow!("error sending partial signature"))?;
+            .map_err(|_e| anyhow!("error sending partial signature"))?;
 
         let partial_signatures: Vec<_> = incoming
             .take(n - 1)
@@ -87,23 +87,16 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
 
         let sig = signing.complete(&partial_signatures)?;
 
-        if let Some(tx) = self.done.take() {
-            let signature_bytes = serde_ipld_dagcbor::to_vec(&sig)
-                .map_err(|e| anyhow!("error encoding signature {e}"))?;
-            tx.send(Ok(signature_bytes))
-                .expect("channel is expected to be open");
-        }
+        let signature_bytes = serde_ipld_dagcbor::to_vec(&sig)
+            .map_err(|e| anyhow!("error encoding signature {e}"))?;
 
-        Ok(())
+        Ok(signature_bytes)
     }
 }
 
 impl KeySign {
     pub fn new(p: &str) -> Self {
-        Self {
-            path: p.to_owned(),
-            done: None,
-        }
+        Self { path: p.to_owned() }
     }
 
     fn read_local_key(&self) -> anyhow::Result<LocalKey<Secp256k1>> {

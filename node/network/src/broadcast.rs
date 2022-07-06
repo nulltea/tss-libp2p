@@ -50,7 +50,7 @@ use std::{
 use crate::messages::{GenericCodec, MessageContext, WireMessage};
 
 pub use libp2p::request_response::{InboundFailure, OutboundFailure, RequestId};
-use log::error;
+use log::{error, info};
 
 /// Configuration for a single request-response protocol.
 #[derive(Debug, Clone)]
@@ -210,9 +210,7 @@ struct BroadcastMessage {
     request: WireMessage,
     channel: ResponseChannel<Result<Vec<u8>, ()>>,
     protocol: String,
-    resp_builder: Option<futures::channel::mpsc::Sender<IncomingMessage>>,
-    // Once we get incoming request we save all params, create an async call to Peerset
-    // to get the reputation of the peer.
+    resp_builder: Option<mpsc::Sender<IncomingMessage>>,
     get_peer_index: Pin<Box<dyn Future<Output = Result<u16, ()>> + Send>>,
 }
 
@@ -679,6 +677,11 @@ impl NetworkBehaviour for Broadcast {
 
                             // Submit the request to the "response builder" passed by the user at
                             // initialization.
+                            info!(
+                                "receiving request from {} with body {:?}",
+                                peer.to_base58(),
+                                std::str::from_utf8(&*request.payload)
+                            );
                             if let Some(mut resp_builder) = resp_builder.clone() {
                                 let _ = resp_builder.try_send(IncomingMessage {
                                     peer_id: peer,

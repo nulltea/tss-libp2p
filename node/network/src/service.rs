@@ -103,7 +103,7 @@ impl NetworkWorker {
         let behaviour = {
             match Behaviour::new(&keypair, broadcast_protocols, params.clone()) {
                 Ok(b) => b,
-                Err(crate::broadcast::RegisterError::DuplicateProtocol(proto)) => {
+                Err(broadcast::RegisterError::DuplicateProtocol(proto)) => {
                     return Err(Error::DuplicateBroadcastProtocol { protocol: proto });
                 }
             }
@@ -173,6 +173,7 @@ impl NetworkWorker {
 
                                 match message {
                                     MessageRouting::Broadcast(payload, response_sender) => {
+                                        println!("sending broadcast to: {:?}", behaviour.peers(room_id).collect::<Vec<_>>());
                                         behaviour.broadcast_message(
                                             behaviour.peers(room_id),
                                             payload,
@@ -183,6 +184,7 @@ impl NetworkWorker {
                                         )
                                     }
                                     MessageRouting::Multicast(peer_ids, payload, response_sender) => {
+                                        println!("sending multicast to: {:?}", peer_ids);
                                         behaviour.broadcast_message(
                                             peer_ids.into_iter(),
                                             payload,
@@ -193,6 +195,7 @@ impl NetworkWorker {
                                         )
                                     }
                                     MessageRouting::SendDirect(peer_id, payload, response_sender) => {
+                                        println!("sending direct to: {}", peer_id.to_base58());
                                         behaviour.send_message(
                                             &peer_id,
                                             payload,
@@ -227,7 +230,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::Broadcast(payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn broadcast_message_owned(
@@ -243,7 +247,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::Broadcast(payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn multicast_message(
@@ -260,7 +265,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::Multicast(peer_ids.collect(), payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn multicast_message_owned(
@@ -277,7 +283,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::Multicast(peer_ids.collect(), payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn send_message(
@@ -294,7 +301,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::SendDirect(peer_id, payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub async fn send_message_owned(
@@ -311,7 +319,8 @@ impl NetworkService {
                 context,
                 message: MessageRouting::SendDirect(peer_id, payload, response_sender),
             })
-            .await;
+            .await
+            .expect("expected worker worker channel to not be full");
     }
 
     pub fn local_peer_id(&self) -> PeerId {

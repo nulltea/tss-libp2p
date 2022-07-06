@@ -3,8 +3,8 @@ use crate::coordination::Phase2Msg;
 use crate::echo::EchoGadget;
 use crate::execution::ProtocolExecution;
 use crate::negotiation::NegotiationMsg;
-use crate::peerset::Peerset;
-use crate::{coordination, ComputeAgentAsync, PeersetCacher, ProtocolAgentFactory};
+
+use crate::{coordination, PersistentCacher, ProtocolAgentFactory};
 use anyhow::anyhow;
 use blake2::Digest;
 use futures::channel::{mpsc, oneshot};
@@ -23,7 +23,7 @@ pub enum RuntimeMessage {
         n: u16,
         protocol_id: u64,
         args: Vec<u8>,
-        done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
+        on_done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
     },
 }
 
@@ -39,7 +39,7 @@ impl RuntimeService {
         n: u16,
         protocol_id: u64,
         args: Vec<u8>,
-        done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
+        on_done: oneshot::Sender<anyhow::Result<Vec<u8>>>,
     ) {
         self.to_runtime
             .send(RuntimeMessage::RequestComputation {
@@ -47,28 +47,27 @@ impl RuntimeService {
                 n,
                 protocol_id,
                 args,
-                done,
+                on_done,
             })
-            .await;
+            .await
+            .expect("request computation expected");
     }
 }
 
-pub struct RuntimeDaemon<TFactory, TPeersetCacher> {
+pub struct RuntimeDaemon<TFactory> {
     network_service: NetworkService,
     rooms: HashMap<RoomId, mpsc::Receiver<broadcast::IncomingMessage>>,
     agents_factory: TFactory,
     from_service: mpsc::Receiver<RuntimeMessage>,
-    peerset_cacher: TPeersetCacher,
+    peerset_cacher: PersistentCacher,
 }
 
-impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCacher>
-    RuntimeDaemon<TFactory, TPeersetCacher>
-{
+impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
     pub fn new(
         network_service: NetworkService,
         rooms: impl Iterator<Item = (RoomId, mpsc::Receiver<broadcast::IncomingMessage>)>,
         agents_factory: TFactory,
-        peerset_cacher: TPeersetCacher,
+        peerset_cacher: PersistentCacher,
     ) -> (Self, RuntimeService) {
         let (tx, rx) = mpsc::channel(2);
 
@@ -96,7 +95,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
             rooms,
             agents_factory,
             from_service,
-            mut peerset_cacher,
+            peerset_cacher,
         } = self;
 
         for (room_id, rx) in rooms.into_iter() {
@@ -121,28 +120,27 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
                             n,
                             protocol_id,
                             args,
-                            done,
+                            on_done,
                         } => {
                             match rooms_rpc.entry(room_id) {
                                 Entry::Occupied(e) => {
-                                    let mut agent = match agents_factory.make(protocol_id) {
+                                    let agent = match agents_factory.make(protocol_id) {
                                         Ok(a) => a,
                                         Err(_) => {
-                                            done.send(Err(anyhow!("unknown protocol")));
+                                            on_done.send(Err(anyhow!("unknown protocol")));
                                             continue;
                                         }
                                     };
                                     let on_rpc = e.remove();
 
                                     if on_rpc.is_canceled() {
-                                        done.send(Err(anyhow!("protocol is busy")));
+                                        on_done.send(Err(anyhow!("protocol is busy")));
                                     } else {
-                                        agent.on_done(done);
-                                        on_rpc.send(LocalRpcMsg{n, args, agent});
+                                        on_rpc.send(LocalRpcMsg{n, args, agent, on_done});
                                     }
                                 }
                                 Entry::Vacant(_) => {
-                                    done.send(Err(anyhow!("protocol is busy")));
+                                    error!("{:?}", on_done.send(Err(anyhow!("protocol is busy"))));
                                 }
                             }
                         },
@@ -178,19 +176,22 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
                                 room_receiver,
                                 receiver_proxy,
                                 parties,
+                                peerset_rx,
                                 init_body,
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(parties.size());
-                                peerset_cacher.write_peerset(&room_id, parties.clone()); // todo verify consistency
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     room_id,
                                     init_body,
                                     agent,
                                     network_service.clone(),
                                     parties,
+                                    peerset_rx,
+                                    peerset_cacher.clone(),
                                     room_receiver,
                                     echo_tx,
+                                    None,
                                 )));
                             }
                             Phase2Msg::Abort(room_id, ch, tx) => {
@@ -202,31 +203,31 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin, TPeersetCacher: PeersetCache
                     coordination::Phase1Msg::FromLocal {
                         id,
                         n,
-                        mut negotiation,
+                        negotiation,
                     } => {
-                        if let Ok(peerset) = peerset_cacher.read_peerset(&id) {
-                            negotiation.set_peerset(peerset);
-                        }
-
                         match negotiation.await {
                             NegotiationMsg::Start {
                                 agent,
+                                on_done,
                                 room_receiver,
                                 receiver_proxy,
                                 parties,
+                                peerset_rx,
                                 args,
                             } => {
                                 network_proxies.push(receiver_proxy);
                                 let (echo, echo_tx) = EchoGadget::new(n as usize);
-                                peerset_cacher.write_peerset(&id, parties.clone());
                                 protocol_executions.push(echo.wrap_execution(ProtocolExecution::new(
                                     id,
                                     args,
                                     agent,
                                     network_service.clone(),
                                     parties,
+                                    peerset_rx,
+                                    peerset_cacher.clone(),
                                     room_receiver,
                                     echo_tx,
+                                    Some(on_done),
                                 )));
                             }
                             NegotiationMsg::Abort(room_id, phase1, rpc_tx) => {

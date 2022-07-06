@@ -13,3 +13,5 @@ party/Cargo.lock
 .DS_Store
 
 data
+
+config_peer*.json
