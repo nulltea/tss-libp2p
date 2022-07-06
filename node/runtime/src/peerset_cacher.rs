@@ -6,8 +6,6 @@ use libp2p::PeerId;
 use mpc_p2p::RoomId;
 use std::collections::HashMap;
 use std::fs;
-use std::fs::File;
-use std::io::{Read, Write};
 
 #[derive(Default)]
 pub struct EphemeralCacher {

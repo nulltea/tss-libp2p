@@ -1,10 +1,9 @@
-use anyhow::anyhow;
 use futures::channel::{mpsc, oneshot};
 use futures_util::{SinkExt, StreamExt};
 use itertools::Itertools;
 use libp2p::PeerId;
 use log::{info, warn};
-use std::collections::{HashMap, HashSet};
+
 use std::io::{BufReader, Read};
 use std::ops::Index;
 
@@ -138,8 +137,8 @@ impl Peerset {
         self.session_peers
             .into_iter()
             .enumerate()
-            .filter(move |(i, p)| *p != self.local_peer_id)
-            .map(|(i, p)| p.clone())
+            .filter(move |(_i, p)| *p != self.local_peer_id)
+            .map(|(_i, p)| p.clone())
     }
 
     pub fn local_peer_id(&self) -> &PeerId {

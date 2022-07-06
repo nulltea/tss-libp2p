@@ -9,7 +9,6 @@ use mpc_rpc::{RpcError, RpcErrorCode, RpcFuture, RpcResult};
 
 use serde::de::DeserializeOwned;
 
-use anyhow::anyhow;
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::party_i::SignatureRecid;
 use std::fmt::{Debug, Display};
 use std::future::Future;
@@ -17,8 +16,6 @@ use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::thread::sleep;
-use std::time::Duration;
 
 pub struct RpcApi {
     rt_service: mpc_runtime::RuntimeService,

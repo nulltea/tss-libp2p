@@ -1,18 +1,16 @@
 use std::fs;
-use std::fs::File;
-use std::hash::Hasher;
-use std::io::{BufReader, Read, Write};
-use std::path::Path;
+
+use std::io::Read;
 
 use anyhow::anyhow;
 use curv::arithmetic::Converter;
-use curv::elliptic::curves::{Point, Secp256k1};
+use curv::elliptic::curves::Secp256k1;
 use curv::BigInt;
-use futures::channel::{mpsc, oneshot};
+
 use futures::future::TryFutureExt;
 use futures::StreamExt;
 use futures_util::{pin_mut, FutureExt, SinkExt, TryStreamExt};
-use log::info;
+
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::LocalKey;
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::sign::{
     OfflineStage, SignManual,
@@ -79,7 +77,7 @@ impl mpc_runtime::ComputeAgentAsync for KeySign {
                 body: partial_signature,
             })
             .await
-            .map_err(|e| anyhow!("error sending partial signature"))?;
+            .map_err(|_e| anyhow!("error sending partial signature"))?;
 
         let partial_signatures: Vec<_> = incoming
             .take(n - 1)

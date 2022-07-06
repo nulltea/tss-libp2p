@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use futures::channel::{mpsc, oneshot};
+use futures::channel::oneshot;
 use futures::{Sink, Stream};
 use futures_util::{SinkExt, StreamExt};
 use log::info;
@@ -33,27 +33,26 @@ where
         })
     });
 
-    let outgoing =
-        futures::sink::unfold(outgoing, move |mut outgoing, message: Msg<M>| async move {
-            info!("Outgoing message: {:?}", message.body);
-            let payload = serde_json::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
-            let (tx, rx) = oneshot::channel();
-            outgoing
-                .send(OutgoingMessage {
-                    body: payload,
-                    to: match message.receiver {
-                        Some(remote_index) => MessageRouting::PointToPoint(remote_index),
-                        None => MessageRouting::Broadcast,
-                    },
-                    sent: Some(tx),
-                })
-                .await
-                .expect("channel is expected to be open");
+    let outgoing = futures::sink::unfold(outgoing, move |outgoing, message: Msg<M>| async move {
+        info!("Outgoing message: {:?}", message.body);
+        let payload = serde_json::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
+        let (tx, rx) = oneshot::channel();
+        outgoing
+            .send(OutgoingMessage {
+                body: payload,
+                to: match message.receiver {
+                    Some(remote_index) => MessageRouting::PointToPoint(remote_index),
+                    None => MessageRouting::Broadcast,
+                },
+                sent: Some(tx),
+            })
+            .await
+            .expect("channel is expected to be open");
 
-            let _ = rx.await;
+        let _ = rx.await;
 
-            Ok::<_, anyhow::Error>(outgoing)
-        });
+        Ok::<_, anyhow::Error>(outgoing)
+    });
 
     (incoming, outgoing)
 }

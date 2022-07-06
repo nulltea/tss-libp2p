@@ -1,8 +1,7 @@
 use crate::peerset::Peerset;
-use anyhow::anyhow;
+
 use futures::channel::oneshot;
 use mpc_p2p::RoomId;
-use std::collections::HashSet;
 
 pub struct IncomingMessage {
     /// Index of party who sent the message.

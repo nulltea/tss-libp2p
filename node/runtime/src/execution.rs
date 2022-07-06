@@ -11,7 +11,7 @@ use libp2p::PeerId;
 use log::{error, info, warn};
 use mpc_p2p::broadcast::OutgoingResponse;
 use mpc_p2p::{broadcast, MessageContext, MessageType, NetworkService, RoomId};
-use std::borrow::BorrowMut;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -98,7 +98,7 @@ impl Future for ProtocolExecution {
             parties,
             peerset_rx: mut from_peerset,
             mut from_network,
-            mut to_protocol,
+            to_protocol,
             mut from_protocol,
             mut echo_tx,
             mut agent_future,

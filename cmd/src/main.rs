@@ -8,11 +8,11 @@ use async_std::task;
 use futures::future::{FutureExt, TryFutureExt};
 use futures::StreamExt;
 use gumdrop::Options;
-use log::info;
+
 use mpc_api::RpcApi;
 use mpc_p2p::{NetworkWorker, NodeKeyConfig, Params, RoomArgs, Secret};
 use mpc_rpc::server::JsonRPCServer;
-use mpc_runtime::{EphemeralCacher, PersistentCacher, RuntimeDaemon};
+use mpc_runtime::{PersistentCacher, RuntimeDaemon};
 use mpc_tss::{generate_config, Config, TssFactory};
 use sha3::Digest;
 use std::error::Error;

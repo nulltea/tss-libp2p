@@ -3,10 +3,8 @@ use crate::coordination::Phase2Msg;
 use crate::echo::EchoGadget;
 use crate::execution::ProtocolExecution;
 use crate::negotiation::NegotiationMsg;
-use crate::peerset::Peerset;
-use crate::{
-    coordination, ComputeAgentAsync, PeersetCacher, PersistentCacher, ProtocolAgentFactory,
-};
+
+use crate::{coordination, PersistentCacher, ProtocolAgentFactory};
 use anyhow::anyhow;
 use blake2::Digest;
 use futures::channel::{mpsc, oneshot};
@@ -97,7 +95,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
             rooms,
             agents_factory,
             from_service,
-            mut peerset_cacher,
+            peerset_cacher,
         } = self;
 
         for (room_id, rx) in rooms.into_iter() {
@@ -126,7 +124,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                         } => {
                             match rooms_rpc.entry(room_id) {
                                 Entry::Occupied(e) => {
-                                    let mut agent = match agents_factory.make(protocol_id) {
+                                    let agent = match agents_factory.make(protocol_id) {
                                         Ok(a) => a,
                                         Err(_) => {
                                             on_done.send(Err(anyhow!("unknown protocol")));
@@ -205,7 +203,7 @@ impl<TFactory: ProtocolAgentFactory + Send + Unpin> RuntimeDaemon<TFactory> {
                     coordination::Phase1Msg::FromLocal {
                         id,
                         n,
-                        mut negotiation,
+                        negotiation,
                     } => {
                         match negotiation.await {
                             NegotiationMsg::Start {

@@ -1,12 +1,11 @@
 use anyhow::anyhow;
 use curv::elliptic::curves::{Point, Secp256k1};
-use futures::channel::oneshot::Sender;
-use futures::channel::{mpsc, oneshot};
+
 use futures::future::TryFutureExt;
 use futures::StreamExt;
-use futures_util::{pin_mut, FutureExt, SinkExt};
+use futures_util::{pin_mut, FutureExt};
 use log::info;
-use mpc_runtime::{IncomingMessage, OutgoingMessage, Peerset, PeersetCacher};
+use mpc_runtime::{IncomingMessage, OutgoingMessage, Peerset};
 use multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2020::state_machine::keygen::{
     Keygen, LocalKey,
 };
