@@ -52,7 +52,7 @@ impl mpc_rpc::JsonRPCHandler for RpcApi {
         let (tx, rx) = oneshot::channel();
         task::spawn(async move {
             rt_service
-                .request_computation(RoomId::from(room), t, 1, msg, tx)
+                .request_computation(RoomId::from(room), t + 1, 1, msg, tx)
                 .await;
         });
 
