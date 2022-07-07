@@ -38,12 +38,6 @@ impl mpc_runtime::ComputeAgentAsync for KeyGen {
     ) -> anyhow::Result<Vec<u8>> {
         let n = parties.len() as u16;
         let i = parties.index_of(parties.local_peer_id()).unwrap() + 1;
-        info!(
-            "n={}, i={}, p={:?}",
-            n,
-            i,
-            parties.clone().into_iter().collect::<Vec<_>>()
-        );
         let mut io = BufReader::new(&*args);
         let t = unsigned_varint::io::read_u16(&mut io).unwrap();
 

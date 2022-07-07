@@ -78,10 +78,6 @@ impl Peerset {
         let (tx, rx) = oneshot::channel();
         let _ = self.to_runtime.send(PeersetMsg::ReadFromCache(tx)).await;
         let cache = rx.await.expect("runtime expected to serve protocol")?;
-        info!(
-            "cache.peers={:?}, cache.indexes={:?}",
-            cache.session_peers, cache.parties_indexes
-        );
         let mut parties_indexes = vec![];
         for peer_id in self.session_peers.iter().sorted_by_key(|p| p.to_bytes()) {
             match cache.index_of(peer_id) {
@@ -111,7 +107,6 @@ impl Peerset {
     }
 
     pub fn index_of(&self, peer_id: &PeerId) -> Option<u16> {
-        info!("session_peers: {:?}", self.session_peers);
         self.session_peers
             .iter()
             .position(|elem| *elem == *peer_id)

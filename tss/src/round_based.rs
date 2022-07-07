@@ -20,8 +20,7 @@ where
     M: Serialize + DeserializeOwned + Debug,
 {
     let incoming = incoming.map(move |msg: IncomingMessage| {
-        let body: M = serde_json::from_slice(&*msg.body).unwrap();
-        info!("Incoming message: {:?}", body);
+        let body: M = serde_ipld_dagcbor::from_slice(&*msg.body).unwrap();
 
         Ok(Msg::<M> {
             sender: msg.from,
@@ -34,8 +33,7 @@ where
     });
 
     let outgoing = futures::sink::unfold(outgoing, move |outgoing, message: Msg<M>| async move {
-        info!("Outgoing message: {:?}", message.body);
-        let payload = serde_json::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
+        let payload = serde_ipld_dagcbor::to_vec(&message.body).map_err(|e| anyhow!("{e}"))?;
         let (tx, rx) = oneshot::channel();
         outgoing
             .send(OutgoingMessage {

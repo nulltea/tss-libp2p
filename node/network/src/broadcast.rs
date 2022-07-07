@@ -677,11 +677,6 @@ impl NetworkBehaviour for Broadcast {
 
                             // Submit the request to the "response builder" passed by the user at
                             // initialization.
-                            info!(
-                                "receiving request from {} with body {:?}",
-                                peer.to_base58(),
-                                std::str::from_utf8(&*request.payload)
-                            );
                             if let Some(mut resp_builder) = resp_builder.clone() {
                                 let _ = resp_builder.try_send(IncomingMessage {
                                     peer_id: peer,

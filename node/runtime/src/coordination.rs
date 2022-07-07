@@ -134,11 +134,6 @@ impl Future for Phase2Chan {
         match self.rx.as_mut().unwrap().try_next() {
             Ok(Some(msg)) => match msg.context.message_type {
                 MessageType::Coordination => {
-                    info!(
-                        "received coordination msg with {} bytes payload: {:?}",
-                        msg.payload.len(),
-                        msg.payload
-                    );
                     let (start_msg, peerset_rx) =
                         match StartMsg::from_bytes(&*msg.payload, self.service.local_peer_id()) {
                             Ok(res) => res,
@@ -152,11 +147,6 @@ impl Future for Phase2Chan {
                             }
                         };
                     let parties = start_msg.parties; // todo: check with cache
-                    info!(
-                        "parties: {:?} [{:?}]",
-                        parties.parties_indexes,
-                        parties.clone().remotes_iter().collect::<Vec<_>>()
-                    );
                     let (proxy, rx) = ReceiverProxy::new(
                         self.id.clone(),
                         self.rx.take().unwrap(),

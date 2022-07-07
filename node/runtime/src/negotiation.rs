@@ -103,12 +103,6 @@ impl Future for NegotiationChan {
                             parties: parties.clone(),
                             body: args.clone(),
                         };
-                        info!(
-                            "peers selected: {:?}, parties: {:?} [{:?}]",
-                            peers,
-                            start_msg.parties.parties_indexes,
-                            start_msg.parties.clone().remotes_iter().collect::<Vec<_>>()
-                        );
                         pending_futures.push(
                             service
                                 .clone()

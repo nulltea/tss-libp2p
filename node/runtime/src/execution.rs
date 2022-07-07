@@ -121,7 +121,7 @@ impl Future for ProtocolExecution {
         }
 
         if let Poll::Ready(Some(message)) = Stream::poll_next(Pin::new(&mut from_protocol), cx) {
-            info!("outgoing message to {:?}", message.to,);
+            info!("outgoing message to {:?}", message.to);
 
             match message.to {
                 MessageRouting::PointToPoint(remote_index) => {
@@ -148,8 +148,6 @@ impl Future for ProtocolExecution {
                     task::spawn(async move {
                         if let Err(e) = res_rx.select_next_some().await {
                             error!("party responded with error: {e}");
-                        } else {
-                            info!("party responded");
                         }
                     });
 
